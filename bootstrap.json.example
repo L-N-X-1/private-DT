@@ -1,0 +1,12 @@
+{
+  "Revision": 1,
+  "IssuerUrl": "https://wazuh-enroll.corp.local:8443",
+  "BootstrapToken": "wzb1.PASTE_FLEET_TOKEN_HERE.SIGNATURE",
+  "TlsPinsSha256": [
+    "REPLACE_WITH_SHA256_OF_agents-rootCA.pem",
+    "REPLACE_WITH_SHA256_OF_issuer.crt"
+  ],
+  "AgentGroup": "windows-agents",
+  "AgentVersion": "4.14.6",
+  "SysmonConfigFile": "sysmonconfig.xml"
+}

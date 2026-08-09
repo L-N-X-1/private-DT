@@ -1,0 +1,102 @@
+<!--
+  /var/ossec/etc/shared/windows-agents/agent.conf
+
+  This is the "basic configuration that syncs automatically" half of the
+  requirement. Agents enrolled with -G windows-agents pull this file from the
+  manager within ~10 minutes and on every restart. Change it here and the
+  whole group picks it up - you never touch an endpoint's ossec.conf again.
+
+  Push it with:
+    docker cp agent.conf-windows-agents.xml \
+      <manager-container>:/var/ossec/etc/shared/windows-agents/agent.conf
+    docker exec <manager-container> chown wazuh:wazuh \
+      /var/ossec/etc/shared/windows-agents/agent.conf
+
+  Validate BEFORE restarting - a malformed agent.conf will be pushed to every
+  agent in the group and can knock the whole group offline:
+    docker exec <manager-container> /var/ossec/bin/verify-agent-conf
+-->
+<agent_config os="Windows">
+
+  <!-- Windows event channels -->
+  <localfile>
+    <location>Microsoft-Windows-Sysmon/Operational</location>
+    <log_format>eventchannel</log_format>
+  </localfile>
+
+  <localfile>
+    <location>Security</location>
+    <log_format>eventchannel</log_format>
+    <query>Event/System[EventID != 5145 and EventID != 5156 and EventID != 5447]</query>
+  </localfile>
+
+  <localfile>
+    <location>System</location>
+    <log_format>eventchannel</log_format>
+  </localfile>
+
+  <localfile>
+    <location>Application</location>
+    <log_format>eventchannel</log_format>
+  </localfile>
+
+  <localfile>
+    <location>Microsoft-Windows-PowerShell/Operational</location>
+    <log_format>eventchannel</log_format>
+  </localfile>
+
+  <localfile>
+    <location>Microsoft-Windows-Windows Defender/Operational</location>
+    <log_format>eventchannel</log_format>
+  </localfile>
+
+  <!-- Re-enrollment safety net. The agent keeps the manager CA so it can
+       still verify the manager, but it does NOT hold a client cert any more
+       (that was consumed at first enrollment and shredded). With
+       ssl_agent_ca enforced on the manager, an agent that loses its key
+       cannot re-enroll on its own - the Intune detection script fails,
+       the installer re-runs, and a fresh cert is fetched. That is the
+       intended repair path. -->
+  <client>
+    <enrollment>
+      <enabled>yes</enabled>
+      <agent_name>${hostname}</agent_name>
+      <groups>windows-agents</groups>
+      <server_ca_path>C:\ProgramData\WazuhBootstrap\manager-ca.pem</server_ca_path>
+      <auto_method>no</auto_method>
+      <delay_after_enrollment>20</delay_after_enrollment>
+    </enrollment>
+  </client>
+
+  <!-- Inventory + posture -->
+  <wodle name="syscollector">
+    <disabled>no</disabled>
+    <interval>1h</interval>
+    <scan_on_start>yes</scan_on_start>
+    <hardware>yes</hardware>
+    <os>yes</os>
+    <network>yes</network>
+    <packages>yes</packages>
+    <ports all="no">yes</ports>
+    <processes>yes</processes>
+    <hotfixes>yes</hotfixes>
+  </wodle>
+
+  <sca>
+    <enabled>yes</enabled>
+    <scan_on_start>yes</scan_on_start>
+    <interval>12h</interval>
+  </sca>
+
+  <!-- File integrity on the paths that matter on a workstation -->
+  <syscheck>
+    <disabled>no</disabled>
+    <frequency>43200</frequency>
+    <scan_on_start>yes</scan_on_start>
+    <directories check_all="yes" realtime="yes">%WINDIR%\System32\drivers\etc</directories>
+    <directories check_all="yes" realtime="yes">%PROGRAMDATA%\Microsoft\Windows\Start Menu\Programs\Startup</directories>
+    <directories check_all="yes">C:\Program Files (x86)\ossec-agent\ossec.conf</directories>
+    <ignore type="sregex">.log$|.tmp$</ignore>
+  </syscheck>
+
+</agent_config>

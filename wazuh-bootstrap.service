@@ -1,0 +1,11 @@
+# /etc/systemd/system/wazuh-bootstrap.service
+[Unit]
+Description=Wazuh agent bootstrap / self-heal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/wazuh-bootstrap/wazuh_bootstrap.sh -c /etc/wazuh-bootstrap/bootstrap.conf -e /opt/wazuh-bootstrap/wazuh_enroll.sh
+StandardOutput=journal
+StandardError=journal

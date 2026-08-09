@@ -1,0 +1,39 @@
+# /etc/systemd/system/wazuh-cert-issuer.service
+[Unit]
+Description=Wazuh agent certificate issuer (REST)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=wazuh-issuer
+Group=wazuh-issuer
+EnvironmentFile=/etc/wazuh-cert-issuer/issuer.env
+WorkingDirectory=/opt/wazuh-cert-issuer
+ExecStartPre=/opt/wazuh-cert-issuer/venv/bin/python -c "import app; app.init_db()"
+ExecStart=/opt/wazuh-cert-issuer/venv/bin/gunicorn \
+    --bind 127.0.0.1:8080 \
+    --workers 2 --threads 4 --timeout 60 \
+    --access-logfile - --error-logfile - \
+    app:app
+Restart=on-failure
+RestartSec=5
+
+# Hardening. The CA key is the crown jewel on this box; keep the blast
+# radius of a bug in this service as small as possible.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+ReadWritePaths=/var/lib/wazuh-cert-issuer
+ReadOnlyPaths=/opt/wazuh-ca /etc/wazuh-cert-issuer
+
+[Install]
+WantedBy=multi-user.target

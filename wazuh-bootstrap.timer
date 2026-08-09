@@ -1,0 +1,17 @@
+# /etc/systemd/system/wazuh-bootstrap.timer
+#
+# The service is a no-op when the agent is healthy, so running it hourly
+# costs nothing and means a host that loses client.keys (reimage, restore
+# from an old snapshot, botched upgrade) re-enrolls itself within the hour
+# instead of silently going dark.
+[Unit]
+Description=Periodic Wazuh agent bootstrap check
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1h
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

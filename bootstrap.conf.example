@@ -1,0 +1,5 @@
+# /etc/wazuh-bootstrap/bootstrap.conf   (chmod 600, root:root)
+ISSUER_URL="https://wazuh-enroll.corp.local:8443"
+BOOTSTRAP_TOKEN="wzb1.PASTE_TOKEN_HERE.SIGNATURE"
+ISSUER_CA="/etc/wazuh-bootstrap/agents-rootCA.pem"
+AGENT_GROUP="linux-agents"
