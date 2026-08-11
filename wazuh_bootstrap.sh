@@ -11,8 +11,20 @@
 # bootstrap.conf (chmod 600, root:root):
 #   ISSUER_URL="https://wazuh-enroll.corp.local:8443"
 #   BOOTSTRAP_TOKEN="wzb1...."
-#   ISSUER_CA="/etc/wazuh-bootstrap/agents-rootCA.pem"
+#   ISSUER_PINS="sha256//<base64 SPKI hash of issuer.crt>"
 #   AGENT_GROUP="linux-agents"
+#
+# Everything needed to reach and verify the issuer lives in that one file --
+# no CA certificate has to be pre-placed on the host, which matches how the
+# Windows package carries TlsPinsSha256 inside bootstrap.json.
+#
+# ISSUER_CA="/path/to/agents-rootCA.pem" is still honoured and takes
+# precedence when the file exists, for hosts that already have it.
+#
+# Compute the pin on the manager:
+#   openssl x509 -in /etc/wazuh-cert-issuer/tls/issuer.crt -pubkey -noout |
+#     openssl pkey -pubin -outform der |
+#     openssl dgst -sha256 -binary | openssl enc -base64
 #
 # Idempotent and safe to run from a systemd timer: if the agent is already
 # enrolled and its service is up, it exits 0 without touching the issuer.
@@ -73,11 +85,50 @@ cleanup() {
 trap cleanup EXIT
 
 CURL_TLS=()
-if [ -n "${ISSUER_CA:-}" ]; then
-  [ -f "$ISSUER_CA" ] || { echo "ERROR: ISSUER_CA not found at $ISSUER_CA" >&2; exit 1; }
+if [ -n "${ISSUER_CA:-}" ] && [ -f "${ISSUER_CA:-}" ]; then
+  # Chain verification against a CA file. Strongest option when the file is
+  # available -- it validates hostname and expiry as well as the chain.
   CURL_TLS=(--cacert "$ISSUER_CA")
+  log "TLS: verifying issuer against CA file $ISSUER_CA"
+
+elif [ -n "${ISSUER_PINS:-}" ]; then
+  # Public-key pinning: the trust anchor lives in bootstrap.conf itself, so
+  # no CA file has to be pre-placed on the host. This is the curl equivalent
+  # of the TlsPinsSha256 callback in Install-WazuhAgent.ps1.
+  #
+  # --insecure disables chain and hostname checks, but --pinnedpubkey is
+  # enforced independently of it: curl aborts unless the server's public key
+  # hashes to one of these values. A MITM presenting any other certificate
+  # fails, so the bootstrap token is never sent to it.
+  #
+  # Note this pins the PUBLIC KEY (SPKI), not the certificate. Renewing
+  # issuer.crt with the same key pair keeps the pin valid; generating a new
+  # key does not. See bootstrap.conf.example for how to compute the value.
+  CURL_TLS=(--insecure --pinnedpubkey "$ISSUER_PINS")
+  log "TLS: verifying issuer by public-key pin (no CA file needed)"
+
+elif [ "${ISSUER_TLS_INSECURE:-0}" = "1" ]; then
+  # Deliberate escape hatch. Anything that answers on the issuer port gets
+  # handed a bootstrap token that mints agent certificates. Lab use only.
+  CURL_TLS=(--insecure)
+  log "WARNING: ISSUER_TLS_INSECURE=1 -- the issuer's identity is NOT verified."
+  log "WARNING: the bootstrap token will be sent to whatever answers on that port."
+
 else
-  log "WARNING: ISSUER_CA not set -- falling back to the system trust store"
+  echo "ERROR: no way to verify the issuer's TLS certificate." >&2
+  echo "       Set ONE of the following in $CONF:" >&2
+  echo "         ISSUER_PINS=\"sha256//<base64>\"            (recommended -- no extra file)" >&2
+  echo "         ISSUER_CA=\"/path/to/agents-rootCA.pem\"    (chain verification)" >&2
+  echo "         ISSUER_TLS_INSECURE=1                     (lab only, no verification)" >&2
+  exit 1
+fi
+
+# --pinnedpubkey landed in curl 7.39. Fail loudly rather than silently
+# dropping the only thing standing between the token and a MITM.
+if [ -n "${ISSUER_PINS:-}" ] && ! curl --help all 2>/dev/null | grep -q -- '--pinnedpubkey'; then
+  echo "ERROR: this curl does not support --pinnedpubkey (needs >= 7.39)." >&2
+  echo "       Set ISSUER_CA instead, or upgrade curl." >&2
+  exit 1
 fi
 
 RESP="$WORK/resp.json"

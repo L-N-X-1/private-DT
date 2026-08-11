@@ -429,3 +429,13 @@ detection in this whole design.
 - **`ssl_verify_host` stays `no`.** Correct for DHCP laptops — CN-is-the-IP
   breaks the moment a device changes network. Don't turn it on for
   workstations.
+
+# Windows pin (cert thumbprint) — hex, uppercase, no colons
+openssl x509 -in /etc/wazuh-cert-issuer/tls/issuer.crt -noout -fingerprint -sha256 |
+  cut -d= -f2 | tr -d ':'
+openssl x509 -in /opt/wazuh-ca/agents-rootCA.pem -noout -fingerprint -sha256 |
+  cut -d= -f2 | tr -d ':'
+
+# Linux pin (SPKI) — base64
+openssl x509 -in /etc/wazuh-cert-issuer/tls/issuer.crt -pubkey -noout |
+  openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl enc -base64

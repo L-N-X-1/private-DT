@@ -1,5 +1,45 @@
 # /etc/wazuh-bootstrap/bootstrap.conf   (chmod 600, root:root)
-ISSUER_URL="https://wazuh-enroll.corp.local:8443"
+#
+# Everything wazuh_bootstrap.sh needs lives in this one file. No CA
+# certificate has to be pre-placed on the host -- the trust anchor is the
+# pin below, the same way the Windows package carries TlsPinsSha256 inside
+# bootstrap.json.
+
+ISSUER_URL="https://192.168.29.192:8443"
+
+# The bootstrap token. This is the credential that mints agent certificates:
+# anything holding it can obtain a valid identity for your fleet. Keep this
+# file 600 root:root and rotate the token on the schedule you set.
 BOOTSTRAP_TOKEN="wzb1.PASTE_TOKEN_HERE.SIGNATURE"
-ISSUER_CA="/etc/wazuh-bootstrap/agents-rootCA.pem"
+
+# Public-key pin for the issuer's TLS certificate. curl refuses to talk to
+# anything whose public key doesn't hash to this, so the token is never sent
+# to an impostor -- without needing agents-rootCA.pem on disk.
+#
+# Compute it on the manager:
+#   openssl x509 -in /etc/wazuh-cert-issuer/tls/issuer.crt -pubkey -noout |
+#     openssl pkey -pubin -outform der |
+#     openssl dgst -sha256 -binary | openssl enc -base64
+#
+# Multiple pins are allowed, separated by ';' -- useful when rolling to a new
+# key pair: publish both, deploy, then drop the old one.
+#   ISSUER_PINS="sha256//OLD...=;sha256//NEW...="
+#
+# This pins the KEY, not the certificate. Renewing issuer.crt from the same
+# key keeps the pin valid; generating a fresh key requires updating it here.
+ISSUER_PINS="sha256//PASTE_BASE64_SPKI_HASH_HERE="
+
 AGENT_GROUP="linux-agents"
+
+# ---------------------------------------------------------------------------
+# Alternatives to ISSUER_PINS (pick exactly one method; CA file wins if set
+# and the file exists):
+#
+# Chain verification against a CA file. Stronger than pinning -- it checks
+# hostname and expiry too -- but needs the file present on every host.
+#   ISSUER_CA="/etc/wazuh-bootstrap/agents-rootCA.pem"
+#
+# No verification at all. Anything answering on the issuer port receives the
+# bootstrap token. Lab use only; never on a machine you care about.
+#   ISSUER_TLS_INSECURE=1
+# ---------------------------------------------------------------------------
