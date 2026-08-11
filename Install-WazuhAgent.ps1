@@ -25,7 +25,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$BootstrapConfig = (Join-Path $PSScriptRoot "bootstrap.json"),
+    [string]$BootstrapConfig,
     [string]$AgentName       = $env:COMPUTERNAME,
     [switch]$KeepCertOnDisk      # only for troubleshooting; leaves the key behind
 )
@@ -37,6 +37,8 @@ $LogDir  = "C:\ProgramData\WazuhBootstrap"
 $LogFile = Join-Path $LogDir "install.log"
 $MarkerKey = "HKLM:\SOFTWARE\Wazuh\Bootstrap"
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+if (-not $BootstrapConfig) { $BootstrapConfig = Join-Path $ScriptDir "bootstrap.json" }
 
 function Log {
     param([string]$Message, [string]$Level = "INFO")
@@ -152,7 +154,7 @@ $pwPath   = Join-Path $secretDir "authd.pass"
 $enrollExit = 1
 try {
     # ------------------------------------------------------------ enroll ----
-    $enrollScript = Join-Path $PSScriptRoot "wazuh_enroll.ps1"
+    $enrollScript = Join-Path $ScriptDir "wazuh_enroll.ps1"
     if (-not (Test-Path $enrollScript)) { throw "wazuh_enroll.ps1 not found next to this script" }
 
     $enrollArgs = @{
@@ -165,7 +167,7 @@ try {
         AgentKeyPath             = $keyPath
     }
     if ($cfg.SysmonConfigFile) {
-        $sysmonCfg = Join-Path $PSScriptRoot $cfg.SysmonConfigFile
+        $sysmonCfg = Join-Path $ScriptDir $cfg.SysmonConfigFile
         if (Test-Path $sysmonCfg) { $enrollArgs["SysmonConfigPath"] = $sysmonCfg }
         else { Log "SysmonConfigFile '$($cfg.SysmonConfigFile)' not found in package, using built-in baseline" "WARN" }
     }

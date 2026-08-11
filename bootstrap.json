@@ -1,0 +1,12 @@
+{
+  "Revision": 1,
+  "IssuerUrl": "https://192.168.29.192:8443",
+  "BootstrapToken": "wzb1.eyJleHAiOjE3ODg5NTA1ODEsImp0aSI6IlJTNEdZay01R1FQQndmdWdTaTRBcWciLCJzY29wZSI6ImxpbnV4Iiwic2luZ2xlX3VzZSI6ZmFsc2V9.3fkSw0S_Xe5wfME47oOtsG406LdLKclICeMgijIuYdI",
+  "TlsPinsSha256": [
+    "95113F2DED78E233E591E50EF072E05A3DFBF24C277ACC5B9B68BDD94B4C7619",
+    "85D1A4F6CE79E311879558A430FEBE7DB8EEA0F3B28D3D41DA6461B660262038"
+  ],
+  "AgentGroup": "windows-agents",
+  "AgentVersion": "4.14.3",
+  "SysmonConfigFile": "sysmonconfig.xml"
+}
