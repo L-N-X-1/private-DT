@@ -1,0 +1,142 @@
+<!--
+  /var/ossec/etc/shared/linux-agents/agent.conf
+
+  Push with:
+    docker cp agent_conf-linux-agents.xml \
+      wazuh.master:/var/ossec/etc/shared/linux-agents/agent.conf
+    docker exec wazuh.master chown wazuh:wazuh \
+      /var/ossec/etc/shared/linux-agents/agent.conf
+    docker exec wazuh.master /var/ossec/bin/verify-agent-conf
+-->
+<agent_config os="Linux">
+
+  <client_buffer>
+    <disabled>no</disabled>
+    <queue_size>5000</queue_size>
+    <events_per_second>500</events_per_second>
+  </client_buffer>
+
+  <!-- Auth / sudo / session activity. Both paths are listed because the
+       agent silently skips a localfile whose target doesn't exist, so one
+       file covers Debian-family and the other RHEL-family. -->
+  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/log/auth.log</location>
+  </localfile>
+
+  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/log/secure</location>
+  </localfile>
+
+  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/log/syslog</location>
+  </localfile>
+
+  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/log/messages</location>
+  </localfile>
+
+  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/log/dpkg.log</location>
+  </localfile>
+
+  <localfile>
+    <log_format>audit</log_format>
+    <location>/var/log/audit/audit.log</location>
+  </localfile>
+
+  <!-- Sysmon's closest Linux equivalent. Uncomment once auditd rules are
+       actually deployed, otherwise this is an empty file generating nothing.
+       On systemd-journal-only hosts (most modern distros) use journald
+       instead - it needs no file on disk:
+  <localfile>
+    <log_format>journald</log_format>
+    <location>journald</location>
+  </localfile>
+  -->
+
+  <localfile>
+    <log_format>command</log_format>
+    <command>df -P</command>
+    <frequency>360</frequency>
+  </localfile>
+
+  <localfile>
+    <log_format>full_command</log_format>
+    <command>last -n 20</command>
+    <alias>last logged in users</alias>
+    <frequency>360</frequency>
+  </localfile>
+
+  <rootcheck>
+    <disabled>no</disabled>
+    <check_files>yes</check_files>
+    <check_trojans>yes</check_trojans>
+    <check_dev>yes</check_dev>
+    <check_sys>yes</check_sys>
+    <check_pids>yes</check_pids>
+    <check_ports>yes</check_ports>
+    <check_if>yes</check_if>
+    <frequency>43200</frequency>
+    <skip_nfs>yes</skip_nfs>
+  </rootcheck>
+
+  <wodle name="syscollector">
+    <disabled>no</disabled>
+    <interval>1h</interval>
+    <scan_on_start>yes</scan_on_start>
+    <hardware>yes</hardware>
+    <os>yes</os>
+    <network>yes</network>
+    <packages>yes</packages>
+    <ports all="no">yes</ports>
+    <processes>yes</processes>
+  </wodle>
+
+  <sca>
+    <enabled>yes</enabled>
+    <scan_on_start>yes</scan_on_start>
+    <interval>12h</interval>
+    <skip_nfs>yes</skip_nfs>
+  </sca>
+
+  <syscheck>
+    <disabled>no</disabled>
+    <frequency>43200</frequency>
+    <scan_on_start>yes</scan_on_start>
+    <alert_new_files>yes</alert_new_files>
+
+    <directories check_all="yes" realtime="yes">/etc</directories>
+    <directories check_all="yes">/bin,/sbin,/usr/bin,/usr/sbin</directories>
+    <directories check_all="yes" realtime="yes">/root/.ssh</directories>
+    <directories check_all="yes" realtime="yes">/etc/wazuh-bootstrap</directories>
+
+    <ignore>/etc/mtab</ignore>
+    <ignore>/etc/hosts.deny</ignore>
+    <ignore>/etc/random-seed</ignore>
+    <ignore>/etc/adjtime</ignore>
+    <ignore>/etc/resolv.conf</ignore>
+    <ignore type="sregex">.log$|.swp$|.tmp$</ignore>
+
+    <nodiff>/etc/shadow</nodiff>
+    <nodiff>/etc/gshadow</nodiff>
+
+    <skip_nfs>yes</skip_nfs>
+    <skip_dev>yes</skip_dev>
+    <skip_proc>yes</skip_proc>
+    <skip_sys>yes</skip_sys>
+    <process_priority>10</process_priority>
+    <max_eps>100</max_eps>
+
+    <synchronization>
+      <enabled>yes</enabled>
+      <interval>5m</interval>
+      <max_eps>10</max_eps>
+    </synchronization>
+  </syscheck>
+
+</agent_config>
