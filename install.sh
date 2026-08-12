@@ -13,7 +13,7 @@ mkdir -p /opt/wazuh-bootstrap /etc/wazuh-bootstrap
 cp wazuh_bootstrap.sh wazuh_enroll.sh /opt/wazuh-bootstrap/
 chmod +x /opt/wazuh-bootstrap/*.sh
 
-cp bootstrap.conf.example /etc/wazuh-bootstrap/bootstrap.conf
+cp bootstrap.conf /etc/wazuh-bootstrap/bootstrap.conf
 chmod 600 /etc/wazuh-bootstrap/bootstrap.conf
 
 echo "==> Installing systemd units..."
