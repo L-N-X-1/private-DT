@@ -338,8 +338,7 @@ Management Extension log at
 sudo mkdir -p /opt/wazuh-bootstrap /etc/wazuh-bootstrap
 sudo cp linux/wazuh_bootstrap.sh wazuh_enroll.sh /opt/wazuh-bootstrap/
 sudo chmod +x /opt/wazuh-bootstrap/*.sh
-sudo cp /opt/wazuh-ca/agents-rootCA.pem /etc/wazuh-bootstrap/
-sudo cp linux/bootstrap.conf.example /etc/wazuh-bootstrap/bootstrap.conf
+sudo cp linux/bootstrap.conf /etc/wazuh-bootstrap/bootstrap.conf
 sudo chmod 600 /etc/wazuh-bootstrap/bootstrap.conf
 sudoedit /etc/wazuh-bootstrap/bootstrap.conf      # paste the token
 

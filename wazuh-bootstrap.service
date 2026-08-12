@@ -1,11 +1,15 @@
 # /etc/systemd/system/wazuh-bootstrap.service
 [Unit]
 Description=Wazuh agent bootstrap / self-heal
-After=network-online.target
+After=network-online.target apt-daily.service apt-daily-upgrade.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 ExecStart=/opt/wazuh-bootstrap/wazuh_bootstrap.sh -c /etc/wazuh-bootstrap/bootstrap.conf -e /opt/wazuh-bootstrap/wazuh_enroll.sh
+TimeoutStartSec=1800
 StandardOutput=journal
 StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

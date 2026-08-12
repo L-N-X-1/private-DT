@@ -227,8 +227,36 @@ wazuh_agent_installed() {
 if ! wazuh_agent_installed; then
   echo "-- wazuh-agent not installed. Installing..."
 
+  # Debian/Ubuntu run unattended-upgrades on a boot-triggered timer that
+  # routinely overlaps a first-boot bootstrap. apt does not queue behind it:
+  # it exits 100 immediately, which propagates all the way up and fails the
+  # whole enrollment for a reason that resolves itself in a couple of minutes.
+  wait_for_dpkg_lock() {
+    local waited=0 max="${DPKG_LOCK_WAIT:-600}"
+    command -v fuser >/dev/null 2>&1 || return 0
+    while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock \
+                /var/lib/apt/lists/lock >/dev/null 2>&1; do
+      if [ "$waited" -ge "$max" ]; then
+        echo "ERROR: dpkg/apt lock still held after ${max}s. Holder:" >&2
+        fuser -v /var/lib/dpkg/lock-frontend 2>&1 >/dev/null | head -5 >&2
+        echo "       Wait for unattended-upgrades to finish and re-run, or set" >&2
+        echo "       DPKG_LOCK_WAIT=<seconds> to wait longer." >&2
+        return 1
+      fi
+      if [ "$waited" -eq 0 ]; then
+        echo "   dpkg/apt is locked (unattended-upgrades?); waiting up to ${max}s..."
+      fi
+      sleep 10
+      waited=$((waited + 10))
+    done
+    [ "$waited" -gt 0 ] && echo "   Lock released after ${waited}s."
+    return 0
+  }
+
   case "$OS_FAMILY" in
     debian)
+      wait_for_dpkg_lock || exit 1
+
       if [ ! -f /usr/share/keyrings/wazuh.gpg ]; then
         echo "   Importing Wazuh GPG key..."
         curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | \
@@ -242,7 +270,11 @@ if ! wazuh_agent_installed; then
           > /etc/apt/sources.list.d/wazuh.list
       fi
 
-      apt-get update -qq
+      # -o DPkg::Lock::Timeout makes apt itself block rather than exit 100 if
+      # something grabs the lock between our check above and this call.
+      apt-get -o DPkg::Lock::Timeout=300 update -qq
+
+      wait_for_dpkg_lock || exit 1
 
       # Use `env` explicitly so the WAZUH_* vars survive regardless of the
       # caller's sudoers env_reset/setenv configuration -- this was the
@@ -251,7 +283,7 @@ if ! wazuh_agent_installed; then
           WAZUH_REGISTRATION_SERVER="$REG_SERVER" \
           WAZUH_REGISTRATION_PASSWORD="$REG_PASSWORD" \
           WAZUH_AGENT_NAME="$AGENT_NAME" \
-          apt-get install -y wazuh-agent
+          apt-get -o DPkg::Lock::Timeout=300 install -y wazuh-agent
       ;;
 
     rhel)
