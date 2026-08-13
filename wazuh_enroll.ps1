@@ -128,7 +128,7 @@ param(
     [switch]$LocalLogSources,
 
     [Parameter(Mandatory = $false)]
-    [string]$Version = "4.14.6"
+    [string]$Version = "4.14.3"
 )
 
 $ErrorActionPreference = "Stop"
