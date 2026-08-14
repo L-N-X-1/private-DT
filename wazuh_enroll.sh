@@ -7,12 +7,19 @@
 # silent "install completed" exit code.
 #
 # Usage:
-#   sudo ./wazuh_enroll.sh -P 'RegistrationPassword' [-m 192.168.29.192] [-n agent-name] [-r registration-server]
+#   sudo ./wazuh_enroll.sh -v <manager_ca> -x <agent_cert> -k <agent_key> [-m 192.168.29.192] [-n agent-name]
 #   (manager defaults to 192.168.29.192 if -m is not given)
 #
 # Notes:
 #   - Must be run as root (via sudo) since it installs packages and
 #     writes to /var/ossec.
+#   - The manager runs with <use_password>no</use_password> and
+#     <ssl_agent_ca> set, so the agent's own certificate (-x/-k) is the
+#     credential. -P is retained only for managers that still require a
+#     registration password; it is optional and normally unused.
+#   - Because the certificate is the only factor, ssl_agent_ca MUST be
+#     configured and working on the manager. Without it, a manager with
+#     use_password=no accepts enrollment from anyone who can reach 1515.
 #   - Safe to re-run: if the agent is already enrolled, it will
 #     re-enroll cleanly (old key is dropped by agent-auth) and restart
 #     the service.
@@ -33,17 +40,14 @@
 #     is not a valid section in shared agent.conf: it's what tells the
 #     agent which manager to talk to, so it has to be present before
 #     the agent can fetch shared config at all.
-#   - Optionally verifies the manager's identity during enrollment via
+#   - Verifies the manager's identity during enrollment via
 #     -v <ca_cert_path>. Without it, agent-auth will accept a TLS cert
-#     from *anything* answering on the registration port -- the
-#     registration password authenticates the agent to the manager,
-#     but nothing authenticates the manager to the agent unless a CA
-#     cert is supplied here. See:
+#     from *anything* answering on the registration port. See:
 #     https://documentation.wazuh.com/current/user-manual/agent/agent-enrollment/security-options/manager-identity-verification.html
-#   - Optionally presents this agent's own signed cert via -x <cert_path>
-#     -k <key_path>, so the manager can verify the agent's identity too
-#     (mirror image of -v; requires ssl_agent_ca set on the manager).
-#     Both flags must be given together. See:
+#   - Presents this agent's own signed cert via -x <cert_path>
+#     -k <key_path>, so the manager can verify the agent's identity
+#     (requires ssl_agent_ca set on the manager). Both flags must be
+#     given together. See:
 #     https://documentation.wazuh.com/current/user-manual/agent/agent-enrollment/security-options/agent-identity-verification.html
 
 set -euo pipefail
@@ -56,31 +60,34 @@ REG_PASSWORD=""
 REG_PORT=1515
 EVENT_PORT=1514
 AGENT_GROUP="linux-agents"
+# Pinned to match the manager. The agent must never be newer than the
+# manager; an unpinned "install latest" will eventually violate that
+# silently the first time Wazuh publishes a new release.
+AGENT_VERSION="4.14.3"
 MANAGER_CA=""
 AGENT_CERT=""
 AGENT_KEY=""
 OSSEC_CONF="/var/ossec/etc/ossec.conf"
-MANAGER_CA_KEEP="/etc/wazuh-bootstrap/manager-ca.pem"
 LOCAL_LOG_SOURCES=0
 CONF_BACKUP=""
 
 usage() {
-  echo "Usage: sudo $0 -P <registration_password> [-m <manager_ip>] [-n <agent_name>] [-r <registration_server_ip>] [-g <agent_group>] [-v <manager_ca_cert_path>]"
+  echo "Usage: sudo $0 -v <manager_ca> -x <agent_cert> -k <agent_key> [-m <manager_ip>] [-n <agent_name>] [-r <registration_server_ip>] [-g <agent_group>]"
   echo
   echo "  -m   Wazuh manager IP/host (used for WAZUH_MANAGER, i.e. where events go). Default: 192.168.29.192"
-  echo "  -P   Registration password (WAZUH_REGISTRATION_PASSWORD)"
   echo "  -n   Agent name to register as (default: system hostname)"
   echo "  -r   Registration server IP/host, if different from -m (default: same as -m)"
   echo "  -g   Agent group to enroll into (must already exist on the manager). Default: linux-agents"
-  echo "  -v   Path to the manager's CA certificate (rootCA.pem or equivalent). When given,"
-  echo "       agent-auth verifies the manager's TLS cert during enrollment instead of"
-  echo "       trusting whatever answers on the registration port. Omit to keep the"
-  echo "       previous (unverified) behavior."
-  echo "  -x   Path to this agent's own signed certificate (sslagent.cert / <name>.cert)."
-  echo "       Must be given together with -k. Lets the manager verify this agent's"
-  echo "       identity (requires ssl_agent_ca configured on the manager)."
-  echo "  -k   Path to this agent's own private key (sslagent.key / <name>.key). Must be"
-  echo "       given together with -x."
+  echo "  -V   wazuh-agent package version to install. Default: 4.14.3 (match your manager)."
+  echo "       Only used when the agent is not already installed."
+  echo "  -v   Path to the manager's CA certificate (agents-rootCA.pem). agent-auth verifies"
+  echo "       the manager's TLS cert during enrollment instead of trusting whatever answers"
+  echo "       on the registration port."
+  echo "  -x   Path to this agent's own signed certificate. Must be given together with -k."
+  echo "       This is the credential the manager checks against ssl_agent_ca."
+  echo "  -k   Path to this agent's own private key. Must be given together with -x."
+  echo "  -P   Registration password. Optional, and normally unused: the manager runs with"
+  echo "       use_password=no. Only needed against a manager that still requires one."
   echo "  -l   Also write baseline auth/syslog <localfile> blocks into the LOCAL"
   echo "       ossec.conf. Off by default because the manager-side group config"
   echo "       already declares them -- having both double-ingests every event."
@@ -88,13 +95,14 @@ usage() {
   exit 1
 }
 
-while getopts "m:P:n:r:g:v:x:k:lh" opt; do
+while getopts "m:P:n:r:g:v:x:k:V:lh" opt; do
   case "$opt" in
     m) MANAGER="$OPTARG" ;;
     P) REG_PASSWORD="$OPTARG" ;;
     n) AGENT_NAME="$OPTARG" ;;
     r) REG_SERVER="$OPTARG" ;;
     g) AGENT_GROUP="$OPTARG" ;;
+    V) AGENT_VERSION="$OPTARG" ;;
     v) MANAGER_CA="$OPTARG" ;;
     x) AGENT_CERT="$OPTARG" ;;
     k) AGENT_KEY="$OPTARG" ;;
@@ -105,8 +113,18 @@ while getopts "m:P:n:r:g:v:x:k:lh" opt; do
 done
 
 [ -z "$MANAGER" ] && usage
-[ -z "$REG_PASSWORD" ] && usage
 [ -z "$REG_SERVER" ] && REG_SERVER="$MANAGER"
+
+# Refuse to enroll with no credential at all. Against a manager configured
+# the way this project expects (use_password=no + ssl_agent_ca), running
+# without -x/-k would either be rejected by authd or -- if ssl_agent_ca is
+# misconfigured -- succeed anonymously, which is far worse than failing.
+if [ -z "$AGENT_CERT" ] && [ -z "$REG_PASSWORD" ]; then
+  echo "ERROR: no enrollment credential given." >&2
+  echo "       Pass -x <cert> -k <key> (normal), or -P <password> against a manager" >&2
+  echo "       that still uses one. Enrolling with neither is never correct." >&2
+  exit 1
+fi
 
 if [ -n "$MANAGER_CA" ] && [ ! -f "$MANAGER_CA" ]; then
   echo "ERROR: manager CA cert not found at $MANAGER_CA (check the -v path)." >&2
@@ -134,8 +152,6 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 # Sweep backups left behind by earlier runs that died before their cleanup.
-# Without this they accumulate in /var/ossec/etc every time a scheduled
-# re-run fails.
 rm -f "${OSSEC_CONF}".bak.* /var/ossec/etc/client.keys.bak.* 2>/dev/null || true
 
 # ---------- distro family detection (drives package manager + log paths) ----------
@@ -167,9 +183,7 @@ if [ "$OS_FAMILY" = "unknown" ]; then
 fi
 
 # Baseline log paths differ by family: Debian ships auth.log/syslog,
-# RHEL-family ships secure/messages instead -- there is no auth.log or
-# syslog file on a RHEL-family box, so this has to branch or step 4 below
-# would silently create files that never get written to.
+# RHEL-family ships secure/messages instead.
 case "$OS_FAMILY" in
   debian) AUTH_LOG_PATH="/var/log/auth.log"; SYS_LOG_PATH="/var/log/syslog" ;;
   rhel)   AUTH_LOG_PATH="/var/log/secure";   SYS_LOG_PATH="/var/log/messages" ;;
@@ -181,6 +195,7 @@ echo "  Registration server (port $REG_PORT):       $REG_SERVER"
 echo "  Agent name:                                 $AGENT_NAME"
 echo "  Agent group:                                 $AGENT_GROUP"
 echo "  Detected distro family:                      $OS_FAMILY (ID=$OS_ID)"
+echo "  Agent version (if not installed):            $AGENT_VERSION"
 if [ -n "$MANAGER_CA" ]; then
   echo "  Manager identity verification:               ENABLED ($MANAGER_CA)"
 else
@@ -189,7 +204,7 @@ fi
 if [ -n "$AGENT_CERT" ]; then
   echo "  Agent identity verification (this agent):    ENABLED ($AGENT_CERT)"
 else
-  echo "  Agent identity verification (this agent):    DISABLED (no -x/-k given -- manager cannot verify this agent's identity)"
+  echo "  Agent identity verification (this agent):    DISABLED (no -x/-k given -- falling back to a registration password)"
 fi
 if [ "$LOCAL_LOG_SOURCES" -eq 1 ]; then
   echo "  Baseline log sources:                        LOCAL (-l given -- remove them from the group agent.conf!)"
@@ -199,21 +214,24 @@ fi
 echo
 
 # ---------- 1. connectivity pre-check ----------
-echo "-- Checking connectivity to registration port ($REG_SERVER:$REG_PORT)..."
-if command -v nc >/dev/null 2>&1; then
-  if ! nc -z -w 5 "$REG_SERVER" "$REG_PORT"; then
-    echo "ERROR: cannot reach $REG_SERVER on port $REG_PORT (enrollment port)." >&2
-    echo "       Check firewall rules and that wazuh-manager/wazuh-authd is running on the manager." >&2
-    exit 1
-  fi
-  echo "   OK: port $REG_PORT is reachable."
-else
-  if [ "$OS_FAMILY" = "debian" ]; then
-    echo "   (netcat not installed, skipping pre-check -- install with 'apt-get install netcat' for this check)"
+for check in "$REG_SERVER:$REG_PORT:registration" "$MANAGER:$EVENT_PORT:event"; do
+  IFS=: read -r c_host c_port c_label <<< "$check"
+  echo "-- Checking connectivity to $c_label port ($c_host:$c_port)..."
+  if command -v nc >/dev/null 2>&1; then
+    if ! nc -z -w 5 "$c_host" "$c_port"; then
+      echo "ERROR: cannot reach $c_host on port $c_port ($c_label port)." >&2
+      echo "       Check firewall rules and that the corresponding Wazuh service is running." >&2
+      exit 1
+    fi
+    echo "   OK: port $c_port is reachable."
   else
-    echo "   (netcat not installed, skipping pre-check -- install with 'yum install nmap-ncat' or 'dnf install nmap-ncat' for this check)"
+    if [ "$OS_FAMILY" = "debian" ]; then
+      echo "   (netcat not installed, skipping pre-check -- install with 'apt-get install netcat-openbsd')"
+    else
+      echo "   (netcat not installed, skipping pre-check -- install with 'dnf install nmap-ncat')"
+    fi
   fi
-fi
+done
 echo
 
 # ---------- 2. install the agent if not already installed ----------
@@ -276,14 +294,29 @@ if ! wazuh_agent_installed; then
 
       wait_for_dpkg_lock || exit 1
 
-      # Use `env` explicitly so the WAZUH_* vars survive regardless of the
-      # caller's sudoers env_reset/setenv configuration -- this was the
-      # actual root cause of silent enrollment failures during install.
+      # No WAZUH_REGISTRATION_PASSWORD: the manager runs use_password=no and
+      # the package's own enrollment is disabled by the <client> block below.
+      # Enrollment is done explicitly by agent-auth in step 6.
+      #
+      # The Wazuh apt repo names packages <version>-1, e.g. 4.14.3-1.
+      if ! apt-cache show "wazuh-agent=${AGENT_VERSION}-1" >/dev/null 2>&1; then
+        echo "ERROR: wazuh-agent ${AGENT_VERSION}-1 is not available in the apt repo." >&2
+        echo "       Available versions:" >&2
+        apt-cache madison wazuh-agent 2>/dev/null | head -10 >&2
+        exit 1
+      fi
+
       env WAZUH_MANAGER="$MANAGER" \
           WAZUH_REGISTRATION_SERVER="$REG_SERVER" \
-          WAZUH_REGISTRATION_PASSWORD="$REG_PASSWORD" \
           WAZUH_AGENT_NAME="$AGENT_NAME" \
-          apt-get -o DPkg::Lock::Timeout=300 install -y wazuh-agent
+          apt-get -o DPkg::Lock::Timeout=300 install -y "wazuh-agent=${AGENT_VERSION}-1"
+
+      # Without a hold, the next unattended-upgrades run pulls whatever the
+      # repo considers current -- which is how an agent silently ends up
+      # newer than its manager. Release the hold deliberately when you
+      # upgrade the manager: apt-mark unhold wazuh-agent
+      apt-mark hold wazuh-agent >/dev/null 2>&1 || true
+      echo "   Pinned wazuh-agent at ${AGENT_VERSION} (apt-mark hold)."
       ;;
 
     rhel)
@@ -310,9 +343,20 @@ EOF
 
       env WAZUH_MANAGER="$MANAGER" \
           WAZUH_REGISTRATION_SERVER="$REG_SERVER" \
-          WAZUH_REGISTRATION_PASSWORD="$REG_PASSWORD" \
           WAZUH_AGENT_NAME="$AGENT_NAME" \
-          "$PKG_MGR" install -y wazuh-agent
+          "$PKG_MGR" install -y "wazuh-agent-${AGENT_VERSION}-1"
+
+      # versionlock needs a plugin that is not installed by default
+      # (python3-dnf-plugin-versionlock / yum-plugin-versionlock). Best
+      # effort -- if it is missing, the version is still what we installed,
+      # it just isn't protected from a future `dnf update`.
+      if "$PKG_MGR" versionlock add wazuh-agent >/dev/null 2>&1; then
+        echo "   Pinned wazuh-agent at ${AGENT_VERSION} (versionlock)."
+      else
+        echo "   NOTE: versionlock plugin unavailable; wazuh-agent is NOT protected"
+        echo "         from a future '$PKG_MGR update'. Install it with:"
+        echo "           $PKG_MGR install -y python3-dnf-plugin-versionlock"
+      fi
       ;;
   esac
 else
@@ -327,8 +371,6 @@ echo
 # explicitly monitor via the manager-side group config), this causes every
 # PAM/auth event to be ingested TWICE -- once via journald, once via the
 # flat log file -- which skews frequency-based detection rules later.
-# We standardize on auth.log/syslog and drop the journald block here so
-# every freshly enrolled agent comes up clean without a manual fix.
 if [ -f "$OSSEC_CONF" ] && grep -q "<log_format>journald</log_format>" "$OSSEC_CONF" 2>/dev/null; then
   echo "-- Removing default journald localfile block from ossec.conf..."
   awk '
@@ -357,13 +399,6 @@ fi
 echo
 
 # ---------- 4. baseline syslog/auth log collection (opt-in, -l) ----------
-# These <localfile> blocks are normally owned by the manager-side group
-# config. Declaring the same location in both the local ossec.conf and the
-# shared agent.conf makes logcollector open TWO readers for that file, so
-# every auth event is counted twice -- which is exactly the double-ingestion
-# problem step 3 above exists to prevent, just arriving by a different route.
-# Off unless -l is given. If you turn it on, delete the matching entries from
-# /var/ossec/etc/shared/linux-agents/agent.conf on the manager.
 add_localfile_if_missing() {
   local location="$1"
   local log_format="${2:-syslog}"
@@ -395,19 +430,22 @@ fi
 echo
 
 # ---------- 5. write the local <client> section ----------
-# <client> cannot live in the manager's shared agent.conf: it's the section
-# that tells the agent which manager to contact and how, so it must already
-# be in place before the agent can pull shared config. Centralized config
-# only supports localfile / syscheck / rootcheck / sca / wodle /
-# active-response / labels / client_buffer.
+# <client> cannot live in the manager's shared agent.conf: it's what tells
+# the agent which manager to contact, so it must be in place before the
+# agent can pull shared config at all.
 #
-# <enrollment><enabled>no</enabled> is deliberate: the manager enforces
-# ssl_agent_ca and this host no longer holds a client cert after the
-# bootstrap wrapper shreds it, so any self-initiated re-enrollment would
-# fail the TLS handshake on a loop and fill ossec.log. Repair happens by
-# re-running the bootstrap wrapper, which fetches a fresh cert.
+# <enrollment><enabled>no</enabled> is deliberate, and there is deliberately
+# no <server_ca_path>: the bootstrap wrapper shreds every certificate --
+# including the manager CA -- once enrollment succeeds. The agent therefore
+# holds no credential it could re-enroll with, so leaving enrollment on
+# would only produce a TLS failure loop in ossec.log. Repair means re-running
+# the bootstrap wrapper with a fresh single-use token.
+#
+# Note the ongoing agent->manager channel on 1514 is NOT TLS: it is Wazuh's
+# own protocol keyed by the AES secret in client.keys. Deleting the manager
+# CA does not affect it.
 write_client_block() {
-  local conf="$1" manager="$2" ca_path="${3:-$MANAGER_CA_KEEP}"
+  local conf="$1" manager="$2"
   local tmp block
 
   block="  <client>
@@ -422,7 +460,6 @@ write_client_block() {
     <auto_restart>yes</auto_restart>
     <enrollment>
       <enabled>no</enabled>
-      <server_ca_path>${ca_path}</server_ca_path>
     </enrollment>
   </client>"
 
@@ -466,15 +503,13 @@ restore_conf() {
 
 write_client_block "$OSSEC_CONF" "$MANAGER"
 
-# ---------- 6. enroll (this is the step that was silently failing before) ----------
+# ---------- 6. enroll ----------
 echo "-- Enrolling agent with $REG_SERVER:$REG_PORT (group: $AGENT_GROUP) ..."
 
 # We have to clear client.keys before calling agent-auth, otherwise it sees a
 # key already present and just skips re-enrollment. But if we truncate it and
-# agent-auth then fails (bad password this run, network blip, authd hiccup),
-# we'd leave a PREVIOUSLY WORKING agent with no key at all -- turning a
-# routine re-run into an outage for an agent that was fine before we touched
-# it. So: back up the existing key first, and put it back if enrollment fails.
+# agent-auth then fails, we'd leave a PREVIOUSLY WORKING agent with no key at
+# all. So: back up the existing key first, and put it back if enrollment fails.
 KEY_BACKUP=""
 if [ -s /var/ossec/etc/client.keys ]; then
   KEY_BACKUP="/var/ossec/etc/client.keys.bak.$$"
@@ -482,7 +517,13 @@ if [ -s /var/ossec/etc/client.keys ]; then
 fi
 : > /var/ossec/etc/client.keys || true
 
-AUTH_ARGS=(-m "$REG_SERVER" -p "$REG_PORT" -A "$AGENT_NAME" -P "$REG_PASSWORD" -G "$AGENT_GROUP")
+# Build the argument list conditionally. An empty "$REG_PASSWORD" passed
+# after -P would make agent-auth consume the NEXT flag as the password
+# value -- so -P followed by -G would silently swallow the group and hang.
+AUTH_ARGS=(-m "$REG_SERVER" -p "$REG_PORT" -A "$AGENT_NAME" -G "$AGENT_GROUP")
+if [ -n "$REG_PASSWORD" ]; then
+  AUTH_ARGS+=(-P "$REG_PASSWORD")
+fi
 if [ -n "$MANAGER_CA" ]; then
   AUTH_ARGS+=(-v "$MANAGER_CA")
 fi
@@ -490,8 +531,16 @@ if [ -n "$AGENT_CERT" ]; then
   AUTH_ARGS+=(-x "$AGENT_CERT" -k "$AGENT_KEY")
 fi
 
-if ! /var/ossec/bin/agent-auth "${AUTH_ARGS[@]}"; then
-  echo "ERROR: agent-auth failed. See output above for the reason (bad password, connection refused, TLS error, cert verification failure, etc.)." >&2
+# agent-auth has no client-side timeout and will block indefinitely on a
+# stalled TLS handshake. Bound it so a firewall drop fails loudly.
+if ! timeout 120 /var/ossec/bin/agent-auth "${AUTH_ARGS[@]}"; then
+  rc=$?
+  if [ "$rc" -eq 124 ]; then
+    echo "ERROR: agent-auth timed out after 120s (stalled TLS handshake or dropped packets)." >&2
+  else
+    echo "ERROR: agent-auth failed (exit $rc). See output above for the reason" >&2
+    echo "       (connection refused, TLS error, cert verification failure, etc.)." >&2
+  fi
   if [ -n "$KEY_BACKUP" ]; then
     echo "         Restoring the previous client.keys so this agent isn't left with no key at all." >&2
     mv "$KEY_BACKUP" /var/ossec/etc/client.keys
@@ -507,8 +556,7 @@ if [ ! -s /var/ossec/etc/client.keys ]; then
   echo "ERROR: enrollment reported success but /var/ossec/etc/client.keys is still empty." >&2
   exit 1
 fi
-echo "-- Enrollment key written:"
-cat /var/ossec/etc/client.keys
+echo "-- Enrollment key written."
 echo
 
 # ---------- 8. restart and verify connection ----------
@@ -528,8 +576,7 @@ fi
 
 # systemctl restart returns success once the unit is launched. A malformed
 # ossec.conf typically lets wazuh-agentd start and then exit a moment later,
-# so the config backup has to survive until after this check -- deleting it
-# any earlier leaves nothing to roll back to.
+# so the config backup has to survive until after this check.
 sleep 3
 if ! systemctl is-active --quiet wazuh-agent; then
   echo "ERROR: wazuh-agent started then stopped -- most likely a bad ossec.conf." >&2

@@ -340,7 +340,6 @@ def agent_bootstrap():
     try:
         cert, key = mint_cert(agent_name)
         manager_ca = s3_get(S3_KEY_MANAGER_CA)
-        enroll_pw = s3_get(S3_KEY_ENROLL_PW).decode().strip()
     except Exception as e:
         log.exception("issuance failed for %s", agent_name)
         audit.error("FAIL ip=%s name=%s err=%s", client_ip, agent_name, e)
@@ -359,7 +358,6 @@ def agent_bootstrap():
         cert_pem_b64=base64.b64encode(cert).decode(),
         key_pem_b64=base64.b64encode(key).decode(),
         manager_ca_pem_b64=base64.b64encode(manager_ca).decode(),
-        enrollment_password=enroll_pw,
     ), 200
 
 

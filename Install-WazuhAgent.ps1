@@ -1,26 +1,32 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Intune Win32 app wrapper: fetch enrollment material from wazuh-cert-issuer,
+    Bootstrap wrapper: fetch enrollment material from wazuh-cert-issuer,
     hand it to wazuh_enroll.ps1, then destroy it.
 
 .DESCRIPTION
-    Ships inside the .intunewin alongside wazuh_enroll.ps1 and bootstrap.json.
-    Runs as SYSTEM. Sequence:
+    Ships inside the Inno Setup package alongside wazuh_enroll.ps1 and
+    bootstrap.json. Runs elevated. Sequence:
 
       1. Read bootstrap.json (issuer URL, bootstrap token, TLS pin)
-      2. POST /v1/agent-bootstrap  -> cert, key, manager CA, enrollment password
+      2. POST /v1/agent-bootstrap  -> agent cert, agent key, manager CA
       3. Write them to a SYSTEM-only ACL'd temp dir
       4. Call wazuh_enroll.ps1 with -ManagerCaPath/-AgentCertificatePath/-AgentKeyPath
-      5. Shred the temp dir and drop a detection marker in the registry
+      5. Shred the temp dir entirely and drop a marker in the registry
 
-    The agent cert exists on disk for the length of one enrollment. After that
-    the agent authenticates with the key in client.keys, so there is nothing
-    left on the endpoint for an attacker to steal and replay.
+    Nothing survives step 5 -- not the private key, not the certificate, and
+    not the manager CA. After enrollment the agent authenticates with the AES
+    key in client.keys over port 1514, which is Wazuh's own protocol rather
+    than TLS, so none of the certificate material has a reader any more.
+
+    This means there is no self-heal: an agent that loses client.keys must be
+    re-bootstrapped by hand with a fresh single-use token. That is deliberate.
+    The alternative -- keeping a long-lived agent key on every endpoint so it
+    can re-enroll itself -- needs a revocation story this CA does not have.
 
 .NOTES
     Log: C:\ProgramData\WazuhBootstrap\install.log
-    Exit 0 = success. Any non-zero exit makes Intune report a failed install.
+    Exit 0 = success. Any non-zero exit is surfaced by the installer.
 #>
 
 [CmdletBinding()]
@@ -43,7 +49,11 @@ if (-not $BootstrapConfig) { $BootstrapConfig = Join-Path $ScriptDir "bootstrap.
 function Log {
     param([string]$Message, [string]$Level = "INFO")
     $line = "{0} [{1}] {2}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Level, $Message
-    Add-Content -Path $LogFile -Value $line
+    # -Encoding UTF8 is not optional. Add-Content defaults to ASCII in
+    # Windows PowerShell 5.1, and the enroll script's output below is
+    # appended as UTF8. Two encodings in one file renders half the log
+    # as mojibake in any reader that picks one.
+    Add-Content -Path $LogFile -Value $line -Encoding UTF8
     Write-Host $line
 }
 
@@ -69,7 +79,12 @@ $agentGroup = if ($cfg.AgentGroup) { $cfg.AgentGroup } else { "windows-agents" }
 # The issuer's cert is signed by agents-rootCA, which Windows has never heard
 # of. Rather than dumping a private CA into the machine trust store (which
 # would make every cert it ever signs trusted for every purpose), pin the
-# expected SHA256 thumbprints and validate manually for this one call.
+# expected SHA256 thumbprint and validate manually for this one call.
+#
+# Pin issuer.crt ONLY. This callback accepts on the first match anywhere in
+# the presented chain, and a server controls the chain it sends -- so pinning
+# agents-rootCA would mean "accept any certificate that CA ever signed",
+# which includes every agent cert ever issued.
 $pins = @()
 if ($cfg.TlsPinsSha256) { $pins = @($cfg.TlsPinsSha256 | ForEach-Object { $_.ToUpper() -replace '[^0-9A-F]', '' }) }
 
@@ -105,10 +120,12 @@ for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
         if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
 
         # 4xx other than 429 will not fix themselves -- fail fast rather than
-        # hammering the issuer with a token it has already rejected.
+        # hammering the issuer with a token it has already rejected. Note a
+        # single-use token is burned on first use even if the run later
+        # fails, so a retry needs a freshly minted one.
         if ($status -and $status -ne 429 -and $status -lt 500) {
             [Net.ServicePointManager]::ServerCertificateValidationCallback = $originalCallback
-            Die "Issuer rejected the request with HTTP $status. Check the bootstrap token has not expired: $($_.Exception.Message)"
+            Die "Issuer rejected the request with HTTP $status. The token may be expired or already used: $($_.Exception.Message)"
         }
         if ($attempt -eq $maxAttempts) {
             [Net.ServicePointManager]::ServerCertificateValidationCallback = $originalCallback
@@ -121,7 +138,16 @@ for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
 }
 [Net.ServicePointManager]::ServerCertificateValidationCallback = $originalCallback
 
-if (-not $resp.cert_pem_b64) { Die "Issuer response did not contain a certificate" }
+if (-not $resp.cert_pem_b64)       { Die "Issuer response did not contain a certificate" }
+if (-not $resp.key_pem_b64)        { Die "Issuer response did not contain a private key" }
+if (-not $resp.manager_ca_pem_b64) { Die "Issuer response did not contain the manager CA" }
+
+# Cheap canary: tells you the manager-side app.py was actually updated.
+if ($resp.PSObject.Properties.Name -contains "enrollment_password") {
+    Log ("Issuer still returns enrollment_password. Nothing consumes it any more -- " +
+         "remove the field from app.py so a non-expiring secret stops being handed out.") "WARN"
+}
+
 Log "Received cert for '$($resp.agent_name)' (valid $($resp.cert_valid_days) days), manager $($resp.manager)"
 
 # ------------------------------------------------- write material to disk ----
@@ -144,12 +170,10 @@ Set-Acl -Path $secretDir -AclObject $acl
 $certPath = Join-Path $secretDir "agent.cert"
 $keyPath  = Join-Path $secretDir "agent.key"
 $caPath   = Join-Path $secretDir "manager-ca.pem"
-$pwPath   = Join-Path $secretDir "authd.pass"
 
 [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($resp.cert_pem_b64))
 [IO.File]::WriteAllBytes($keyPath,  [Convert]::FromBase64String($resp.key_pem_b64))
 [IO.File]::WriteAllBytes($caPath,   [Convert]::FromBase64String($resp.manager_ca_pem_b64))
-[IO.File]::WriteAllText($pwPath, $resp.enrollment_password, (New-Object Text.UTF8Encoding($false)))
 
 $enrollExit = 1
 try {
@@ -159,7 +183,6 @@ try {
 
     $enrollArgs = @{
         Manager                  = $resp.manager
-        RegistrationPasswordFile = $pwPath
         AgentName                = $resp.agent_name
         AgentGroup               = $agentGroup
         ManagerCaPath            = $caPath
@@ -174,14 +197,23 @@ try {
     if ($cfg.AgentVersion) { $enrollArgs["Version"] = $cfg.AgentVersion }
 
     Log "Handing off to wazuh_enroll.ps1"
-    & $enrollScript @enrollArgs *>&1 | Tee-Object -FilePath $LogFile -Append
+    & $enrollScript @enrollArgs 2>&1 | ForEach-Object {
+        $line = $_.ToString()
+        Write-Host $line
+        Add-Content -Path $LogFile -Value $line -Encoding UTF8
+    }
     $enrollExit = $LASTEXITCODE
     if ($null -eq $enrollExit) { $enrollExit = 0 }
 }
 finally {
     # ------------------------------------------------------------ shred ----
     if (-not $KeepCertOnDisk) {
-        foreach ($f in @($certPath, $keyPath, $pwPath)) {
+        # Zero the private key and certificate before unlinking. This is a
+        # best effort on NTFS -- a journaled filesystem on an SSD with wear
+        # levelling may keep the original blocks. The real protection is that
+        # the key existed for the length of one enrollment and is useless
+        # once client.keys is written.
+        foreach ($f in @($certPath, $keyPath)) {
             if (Test-Path $f) {
                 try {
                     $len = (Get-Item $f).Length
@@ -190,12 +222,12 @@ finally {
                 Remove-Item $f -Force -ErrorAction SilentlyContinue
             }
         }
-        # The manager CA is a public cert -- the agent keeps it so it can
-        # verify the manager on any future auto re-enrollment.
-        $keepCa = Join-Path $env:ProgramData "WazuhBootstrap\manager-ca.pem"
-        if (Test-Path $caPath) { Move-Item $caPath $keepCa -Force -ErrorAction SilentlyContinue }
+        # The manager CA goes too. It is only used by agent-auth on port 1515,
+        # and enrollment is disabled in ossec.conf afterwards, so nothing
+        # reads it again. If you re-enable <enrollment>, you must also stop
+        # deleting this and restore <server_ca_path> in wazuh_enroll.ps1.
         Remove-Item $secretDir -Recurse -Force -ErrorAction SilentlyContinue
-        Log "Enrollment material shredded from disk"
+        Log "Enrollment material shredded from disk (cert, key, and manager CA)"
     } else {
         Log "-KeepCertOnDisk set: private key left at $keyPath" "WARN"
     }

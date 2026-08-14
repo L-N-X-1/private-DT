@@ -133,17 +133,6 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if (-not $RegistrationPassword -and -not $RegistrationPasswordFile) {
-    Write-Host "ERROR: provide either -RegistrationPassword or -RegistrationPasswordFile." -ForegroundColor Red
-    exit 1
-}
-if ($RegistrationPasswordFile) {
-    if (-not (Test-Path $RegistrationPasswordFile)) {
-        Write-Host "ERROR: password file not found at $RegistrationPasswordFile" -ForegroundColor Red
-        exit 1
-    }
-    $RegistrationPassword = (Get-Content $RegistrationPasswordFile -Raw).Trim()
-}
 if ($ManagerCaPath -and -not (Test-Path $ManagerCaPath)) {
     Write-Host "ERROR: manager CA cert not found at $ManagerCaPath (check -ManagerCaPath)." -ForegroundColor Red
     exit 1
@@ -391,7 +380,6 @@ function Set-WazuhClientBlock {
     param(
         [Parameter(Mandatory)][string]$ConfPath,
         [Parameter(Mandatory)][string]$Manager,
-        [string]$ManagerCaKeepPath = "C:\ProgramData\WazuhBootstrap\manager-ca.pem",
         [int]$Port = 1514
     )
 
@@ -415,7 +403,6 @@ function Set-WazuhClientBlock {
     <auto_restart>yes</auto_restart>
     <enrollment>
       <enabled>no</enabled>
-      <server_ca_path>$ManagerCaKeepPath</server_ca_path>
     </enrollment>
   </client>
 "@
@@ -482,9 +469,9 @@ $authArgs = @(
     "-m", $RegistrationServer,
     "-p", $RegPort,
     "-A", $AgentName,
-    "-P", $RegistrationPassword,
     "-G", $AgentGroup
 )
+if ($RegistrationPassword) { $authArgs += @("-P", $RegistrationPassword) }
 if ($ManagerCaPath) {
     $authArgs += @("-v", $ManagerCaPath)
 }
@@ -493,6 +480,12 @@ if ($AgentCertificatePath) {
 }
 
 $authProc = Start-Process -FilePath $AgentAuthExe -ArgumentList $authArgs -Wait -PassThru -NoNewWindow
+if (-not $authProc.WaitForExit(120000)) {
+    $authProc.Kill()
+    if ($keyBackup) { Move-Item $keyBackup $ClientKeys -Force }
+    Restore-OssecConf
+    Fail "agent-auth.exe timed out after 120s. Check $OssecLog and the manager's ossec.log."
+}
 if ($authProc.ExitCode -ne 0) {
     if ($keyBackup) {
         Write-Host "         Restoring the previous client.keys so this agent isn't left with no key at all." -ForegroundColor Yellow
