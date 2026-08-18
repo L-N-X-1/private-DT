@@ -8,5 +8,7 @@
   ],
   "AgentGroup": "windows-agents",
   "AgentVersion": "4.14.6",
-  "SysmonConfigFile": "sysmonconfig.xml"
+  "SysmonConfigFile": "sysmonconfig.xml",
+  "AuditingInstallTask": false, ##AuditingInstallTask stays false in the Intune package and true in a build for standalone hosts.
+  "SkipProcessCreation": false
 }

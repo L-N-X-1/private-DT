@@ -49,9 +49,18 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 # distro. Install them rather than failing, since the endpoint already needs
 # repo access to fetch the wazuh-agent package a moment later.
 install_prereqs() {
-  local missing=()
-  for tool in curl jq; do
-    command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+  local missing=() pkgs=()
+  # command -> package name. gpg comes from gnupg and is absent from
+  # minimal/cloud Ubuntu images, where the enroll script would then die
+  # importing the Wazuh signing key.
+  for tool in curl jq gpg; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      missing+=("$tool")
+      case "$tool" in
+        gpg) pkgs+=("gnupg") ;;
+        *)   pkgs+=("$tool") ;;
+      esac
+    fi
   done
   [ "${#missing[@]}" -eq 0 ] && return 0
 
@@ -70,13 +79,13 @@ install_prereqs() {
       # 100 immediately rather than queueing behind a held lock.
       apt-get -o DPkg::Lock::Timeout=300 update -qq
       DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 \
-        install -y "${missing[@]}"
+        install -y "${pkgs[@]}"
       ;;
     *rhel*|*centos*|*rocky*|*almalinux*|*fedora*|*amzn*|*ol*)
       local pkg="yum"
       command -v dnf >/dev/null 2>&1 && pkg="dnf"
       # jq lives in EPEL on RHEL 8/9 derivatives; if this fails, that is why.
-      "$pkg" install -y "${missing[@]}"
+      "$pkg" install -y "${pkgs[@]}"
       ;;
     *)
       die "cannot auto-install ${missing[*]} on this distro (ID=$os_id).
@@ -92,7 +101,32 @@ install_prereqs() {
   echo "   Installed."
 }
 
+# Check outbound access to the package repo BEFORE spending the token. A
+# single-use token is burned the moment the issuer authenticates it, so
+# discovering there is no internet three steps later costs a fresh mint.
+check_repo_reachable() {
+  echo "-- Checking outbound access to packages.wazuh.com..."
+  if curl -fsSL --max-time 20 --retry 2 \
+       https://packages.wazuh.com/key/GPG-KEY-WAZUH -o /dev/null 2>/dev/null; then
+    echo "   OK."
+    return 0
+  fi
+  echo "ERROR: cannot reach packages.wazuh.com." >&2
+  echo "       The agent package cannot be installed from here. Stopping now" >&2
+  echo "       rather than burning your bootstrap token on a run that would" >&2
+  echo "       fail a few steps later." >&2
+  echo >&2
+  echo "       Diagnose with:" >&2
+  echo "         curl -fsSL https://packages.wazuh.com/key/GPG-KEY-WAZUH | head -3" >&2
+  echo "         getent hosts packages.wazuh.com" >&2
+  echo >&2
+  echo "       Set SKIP_REPO_CHECK=1 to bypass this (e.g. if you mirror the" >&2
+  echo "       repo internally or preinstall the agent package)." >&2
+  exit 1
+}
+
 install_prereqs
+[ "${SKIP_REPO_CHECK:-0}" = "1" ] || check_repo_reachable
 
 [ -f "$CONF" ] || die "config not found at $CONF"
 # shellcheck disable=SC1090
@@ -217,6 +251,32 @@ echo
   -x "$CERT" \
   -k "$KEY"
 
+  # ---------- Sprint 3: endpoint command auditing ----------
+# Runs AFTER enrollment so a failed enrollment does not leave a host with
+# audit rules but no agent to ship them.
+#
+# Non-fatal on purpose. The agent is enrolled and reporting at this point;
+# an auditd problem should not make the operator think enrollment failed and
+# burn a second single-use token re-running the whole thing. The script is
+# idempotent and standalone, so the repair is just re-running it.
+AUDIT_SETUP="${AUDIT_SETUP:-/opt/wazuh-bootstrap/wazuh_audit_setup.sh}"
+
+if [ -x "$AUDIT_SETUP" ]; then
+  echo
+  echo "-- Configuring command auditing (Sprint 3 Phase 1)..."
+  if "$AUDIT_SETUP" ${AUDIT_TIMER:+--install-timer}; then
+    echo "-- Command auditing configured."
+  else
+    echo "WARNING: command auditing setup reported problems. The agent is" >&2
+    echo "         enrolled and reporting -- do NOT re-run this bootstrap" >&2
+    echo "         script (the token is spent). Fix and re-run:" >&2
+    echo "           sudo $AUDIT_SETUP --check" >&2
+  fi
+else
+  echo
+  echo "NOTE: $AUDIT_SETUP not found -- command auditing not configured."
+  echo "      Copy it to /opt/wazuh-bootstrap/ and run it separately."
+fi
 # cleanup() runs from the EXIT trap and removes the whole tmpfs directory --
 # certificate, private key, manager CA, and the raw response.
 echo

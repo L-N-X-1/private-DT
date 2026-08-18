@@ -275,11 +275,36 @@ if ! wazuh_agent_installed; then
     debian)
       wait_for_dpkg_lock || exit 1
 
-      if [ ! -f /usr/share/keyrings/wazuh.gpg ]; then
+      # -s not -f: gpg creates the keyring file before it parses anything, so
+      # a failed import leaves a zero-byte file behind. Testing -f would make
+      # the next run skip the import and fail much later with NO_PUBKEY.
+      if [ ! -s /usr/share/keyrings/wazuh.gpg ]; then
         echo "   Importing Wazuh GPG key..."
-        curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | \
-          gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+        rm -f /usr/share/keyrings/wazuh.gpg
+        keytmp="$(mktemp)"
+        # -f so an HTTP error is a curl failure rather than an error page
+        # piped into gpg; --show-error so we learn why.
+        if ! curl -fsSL --show-error --retry 3 --retry-delay 3 --max-time 60 \
+             https://packages.wazuh.com/key/GPG-KEY-WAZUH -o "$keytmp"; then
+          rm -f "$keytmp"
+          echo "ERROR: could not download the Wazuh GPG key." >&2
+          echo "       This host needs outbound HTTPS to packages.wazuh.com." >&2
+          echo "       Test it directly with:" >&2
+          echo "         curl -fsSL https://packages.wazuh.com/key/GPG-KEY-WAZUH | head -3" >&2
+          echo "       If your endpoints have no internet egress, mirror the repo" >&2
+          echo "       internally or install the .deb from S3 artifacts/ instead." >&2
+          exit 1
+        fi
+        if ! gpg --batch --no-default-keyring \
+             --keyring "gnupg-ring:/usr/share/keyrings/wazuh.gpg" --import "$keytmp"; then
+          rm -f "$keytmp" /usr/share/keyrings/wazuh.gpg
+          echo "ERROR: the downloaded file was not a valid OpenPGP key." >&2
+          echo "       A captive portal or proxy may be returning an HTML page." >&2
+          exit 1
+        fi
+        rm -f "$keytmp"
         chmod 644 /usr/share/keyrings/wazuh.gpg
+        echo "   Key imported."
       fi
 
       if [ ! -f /etc/apt/sources.list.d/wazuh.list ]; then
@@ -322,7 +347,13 @@ if ! wazuh_agent_installed; then
     rhel)
       if [ ! -f /etc/yum.repos.d/wazuh.repo ]; then
         echo "   Importing Wazuh GPG key..."
-        rpm --import https://packages.wazuh.com/key/GPG-KEY-WAZUH
+        if ! rpm --import https://packages.wazuh.com/key/GPG-KEY-WAZUH; then
+          echo "ERROR: could not import the Wazuh GPG key." >&2
+          echo "       This host needs outbound HTTPS to packages.wazuh.com." >&2
+          echo "       Test it directly with:" >&2
+          echo "         curl -fsSL https://packages.wazuh.com/key/GPG-KEY-WAZUH | head -3" >&2
+          exit 1
+        fi
 
         echo "   Adding Wazuh yum repository..."
         # Quoted heredoc delimiter ('EOF') so $releasever is left literal --
@@ -500,6 +531,39 @@ restore_conf() {
     systemctl restart wazuh-agent >/dev/null 2>&1 || true
   fi
 }
+
+# ---------- 5b. enable manager-pushed commands ----------
+# Wazuh drops <command>/<full_command> localfile blocks that arrive from the
+# manager's shared agent.conf unless the agent opts in (ossec.log 1108).
+# Sprint 3 delivers netstat/process-diff blocks that way, so without this they
+# are silently ignored.
+#
+# TRADE-OFF: the manager can now execute commands on this endpoint. Accepted
+# here because the manager is internal-only and single-tenant. This would need
+# rethinking in a hosted or multi-tenant deployment.
+enable_remote_commands() {
+  local lio=/var/ossec/etc/local_internal_options.conf
+  local opt key created=0
+
+  [ -f "$lio" ] || { touch "$lio"; created=1; }
+
+  for opt in logcollector.remote_commands=1 wazuh_command.remote_commands=1; do
+    grep -qxF "$opt" "$lio" && continue
+    key="${opt%%=*}"
+    # Remove any stale =0 line first, or the file ends up with both and the
+    # last one silently wins.
+    sed -i "\|^${key}=|d" "$lio"
+    echo "$opt" >> "$lio"
+    echo "-- local_internal_options.conf: set $opt"
+  done
+
+  # Only set ownership on a file we created; don't stomp existing perms.
+  if [ "$created" -eq 1 ]; then
+    chown root:wazuh "$lio" 2>/dev/null || true
+    chmod 640 "$lio" 2>/dev/null || true
+  fi
+}
+enable_remote_commands
 
 write_client_block "$OSSEC_CONF" "$MANAGER"
 

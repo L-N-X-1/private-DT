@@ -31,3 +31,9 @@ AGENT_GROUP="linux-agents"
 # (apt-mark hold / dnf versionlock) so a later system update cannot drift
 # past it; release the hold deliberately when you upgrade the manager.
 AGENT_VERSION="4.14.3"
+
+# Install the daily audit-config drift enforcement timer.
+# Default 1. Set to 0 only where auditd rules are managed by Ansible/Puppet or
+# a CIS hardening baseline -- two things rewriting /etc/audit/rules.d/ will
+# fight each other, and the loser is whichever ran first.
+AUDIT_TIMER=1

@@ -36,14 +36,34 @@ if (-not $sysmon) { $sysmon = Get-Service -Name "Sysmon" -ErrorAction SilentlyCo
 if (-not $sysmon)                     { $problems += "Sysmon service missing" }
 elseif ($sysmon.Status -ne "Running") { $problems += "Sysmon not running" }
 
+$MinAuditRev = 1     # bump alongside $AuditRev in Configure-EndpointAuditing.ps1
+
+# 4688 command-line inclusion. Checking the registry rather than shelling out
+# to auditpol keeps this well inside Intune's 60s detection budget.
+$cmdLine = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit" `
+                            -Name "ProcessCreationIncludeCmdLine_Enabled" -ErrorAction SilentlyContinue
+if (-not $cmdLine -or $cmdLine.ProcessCreationIncludeCmdLine_Enabled -ne 1) {
+    $problems += "4688 command-line logging disabled"
+}
+
+# Script block logging. agent.conf has collected the PowerShell channel since
+# Sprint 2, but without this the channel is nearly empty -- collection looks
+# healthy while carrying nothing.
+$sbl = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging" `
+                        -Name "EnableScriptBlockLogging" -ErrorAction SilentlyContinue
+if (-not $sbl -or $sbl.EnableScriptBlockLogging -ne 1) {
+    $problems += "PowerShell script block logging disabled"
+}
+
 $marker = Get-ItemProperty -Path $MarkerKey -ErrorAction SilentlyContinue
 if (-not $marker)                     { $problems += "bootstrap marker missing" }
 elseif ([int]($marker.BootstrapRev) -lt $MinRevision) { $problems += "bootstrap revision too old" }
+elseif ([int]($marker.AuditRev)     -lt $MinAuditRev) { $problems += "audit config revision too old" }
 
 if ($problems.Count -gt 0) {
     # No stdout on the not-detected path.
     exit 1
 }
 
-Write-Output "Wazuh agent enrolled as $($marker.AgentName) against $($marker.Manager) (rev $($marker.BootstrapRev))"
+Write-Output "Wazuh agent enrolled as $($marker.AgentName) against $($marker.Manager) (rev $($marker.BootstrapRev), audit rev $($marker.AuditRev))"
 exit 0

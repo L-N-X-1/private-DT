@@ -235,6 +235,44 @@ finally {
 
 if ($enrollExit -ne 0) { Die "wazuh_enroll.ps1 exited with code $enrollExit" $enrollExit }
 
+# --------------------------------------------- endpoint auditing (Sprint 3) ----
+# Runs after enrollment: no point setting audit policy on a host whose agent
+# never came up.
+#
+# Non-fatal on purpose. The agent is enrolled and reporting by this point, and
+# Detect-WazuhAgent.ps1 checks these settings independently -- so a failure here
+# fails detection, Intune re-runs this installer, and the loop repairs itself.
+# Dying here instead would mark the whole Win32 app as failed and hide the fact
+# that enrollment actually succeeded.
+$auditScript = Join-Path $ScriptDir "Configure-EndpointAuditing.ps1"
+if (Test-Path $auditScript) {
+    Log "Configuring endpoint auditing (Sprint 3 Phase 3)"
+    $auditArgs = @{}
+    if ($cfg.SysmonConfigFile) {
+        $sc = Join-Path $ScriptDir $cfg.SysmonConfigFile
+        if (Test-Path $sc) { $auditArgs["SysmonConfigPath"] = $sc }
+    }
+    # InstallTask is NOT passed here. On an Intune-managed host the app is
+    # installed by Intune, so Intune owns enforcement -- see question 3.
+    if ($cfg.AuditingInstallTask -eq $true) { $auditArgs["InstallTask"] = $true }
+    if ($cfg.SkipProcessCreation -eq $true) { $auditArgs["SkipProcessCreation"] = $true }
+
+    try {
+        & $auditScript @auditArgs 2>&1 | ForEach-Object {
+            $line = $_.ToString()
+            Write-Host $line
+            Add-Content -Path $LogFile -Value $line -Encoding UTF8
+        }
+        if ($LASTEXITCODE -ne 0) {
+            Log "Configure-EndpointAuditing.ps1 exited $LASTEXITCODE. Enrollment is fine; detection will flag this." "WARN"
+        }
+    } catch {
+        Log "Configure-EndpointAuditing.ps1 threw: $($_.Exception.Message)" "WARN"
+    }
+} else {
+    Log "Configure-EndpointAuditing.ps1 not found in package -- auditing NOT configured." "WARN"
+}
+
 # ----------------------------------------------------------- marker ----
 New-Item -Path $MarkerKey -Force | Out-Null
 Set-ItemProperty -Path $MarkerKey -Name "AgentName"     -Value $resp.agent_name
