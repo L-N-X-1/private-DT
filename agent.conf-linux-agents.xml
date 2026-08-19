@@ -42,6 +42,7 @@
       <ignore>/etc/adjtime</ignore>
       <ignore>/etc/resolv.conf</ignore>
       <ignore>/etc/ld.so.cache</ignore>
+      <ignore>/etc/pulse</ignore>
       <ignore type="sregex">\.log$|\.swp$|\.tmp$|\.swx$|~$</ignore>
       <nodiff>/etc/shadow</nodiff>
       <nodiff>/etc/gshadow</nodiff>

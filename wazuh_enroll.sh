@@ -40,6 +40,11 @@
 #     is not a valid section in shared agent.conf: it's what tells the
 #     agent which manager to talk to, so it has to be present before
 #     the agent can fetch shared config at all.
+#   - Installs net-tools (for netstat) if it is missing, since the
+#     manager-pushed netstat command blocks need it and it is absent
+#     from most modern default installs. Non-fatal: a failure here
+#     warns and continues rather than failing an enrollment that has
+#     already spent a single-use bootstrap token.
 #   - Verifies the manager's identity during enrollment via
 #     -v <ca_cert_path>. Without it, agent-auth will accept a TLS cert
 #     from *anything* answering on the registration port. See:
@@ -392,6 +397,67 @@ EOF
   esac
 else
   echo "-- wazuh-agent already installed, skipping package install."
+fi
+echo
+
+# ---------- 2b. install net-tools (netstat) ----------
+# Sprint 3 pushes <command>/<full_command> blocks from the manager's shared
+# agent.conf, and the netstat-based ones need the netstat binary, which lives
+# in net-tools. That package is NOT installed by default on modern
+# Ubuntu/Debian or on minimal RHEL-family/cloud images, so without this the
+# command blocks run and return nothing -- a silent gap, not an error.
+#
+# Deliberately NON-FATAL. By the time this runs the bootstrap wrapper has
+# already spent its single-use token; aborting here would force a fresh mint
+# for a package the operator can install by hand in one command afterwards.
+#
+# Note: this does NOT provide `nc` for the connectivity pre-check above --
+# that is netcat-openbsd (Debian) / nmap-ncat (RHEL), a separate package.
+have_netstat() {
+  command -v netstat >/dev/null 2>&1 || [ -x /usr/sbin/netstat ] || [ -x /bin/netstat ]
+}
+
+install_net_tools() {
+  if have_netstat; then
+    echo "-- net-tools already present, skipping."
+    return 0
+  fi
+
+  echo "-- netstat not found. Installing net-tools..."
+  case "$OS_FAMILY" in
+    debian)
+      # Same unattended-upgrades race as the agent install: DPkg::Lock::Timeout
+      # makes apt block on a held lock instead of exiting 100 immediately.
+      if ! DEBIAN_FRONTEND=noninteractive \
+           apt-get -o DPkg::Lock::Timeout=300 install -y net-tools >/dev/null 2>&1; then
+        # Package lists can be empty or stale when wazuh-agent was already
+        # installed and we skipped the apt-get update in step 2.
+        apt-get -o DPkg::Lock::Timeout=300 update -qq || true
+        DEBIAN_FRONTEND=noninteractive \
+          apt-get -o DPkg::Lock::Timeout=300 install -y net-tools || return 1
+      fi
+      ;;
+    rhel)
+      local pkg_mgr="yum"
+      command -v dnf >/dev/null 2>&1 && pkg_mgr="dnf"
+      "$pkg_mgr" install -y net-tools || return 1
+      ;;
+  esac
+
+  have_netstat || return 1
+  echo "   Installed."
+}
+
+if ! install_net_tools; then
+  echo "WARNING: could not install net-tools." >&2
+  echo "         Enrollment continues -- the agent is unaffected -- but any" >&2
+  echo "         manager-pushed netstat command block will produce no output." >&2
+  echo "         Fix it by hand; no re-enrollment is needed:" >&2
+  if [ "$OS_FAMILY" = "debian" ]; then
+    echo "           sudo apt-get install -y net-tools" >&2
+  else
+    echo "           sudo dnf install -y net-tools" >&2
+  fi
 fi
 echo
 

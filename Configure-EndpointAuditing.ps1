@@ -10,6 +10,13 @@
       1. Security 4688 process creation, WITH the command line
       2. PowerShell script block logging (EID 4104) and module logging (4103)
       3. Optional: re-assert an already-installed Sysmon's config (drift only)
+      4. remote_commands in local_internal_options.conf, so <localfile><command>
+         stanzas pushed from the shared agent.conf actually execute
+
+    On (4): wazuh_enroll.ps1 sets this once at enrollment. It is re-enforced
+    here because an agent MSI upgrade replaces local_internal_options.conf and
+    nothing else notices -- the agent stays healthy and only the command-based
+    telemetry goes quiet.
 
     DELIBERATELY SEPARATE FROM Install-WazuhAgent.ps1, for the same reason
     wazuh_audit_setup.sh is separate from wazuh_bootstrap.sh on Linux:
@@ -42,6 +49,16 @@
     config drift (someone ran `sysmon -c` with something else). Does not
     install Sysmon if absent.
 
+    Defaults to C:\ProgramData\WazuhBootstrap\sysmonconfig.xml if that file
+    exists. Without a default the scheduled task -- which is registered with
+    no arguments -- would never check Sysmon drift at all, so the one loop
+    meant to catch drift was blind to it.
+
+.PARAMETER SkipRemoteCommands
+    Do not enforce logcollector.remote_commands / wazuh_command.remote_commands
+    in local_internal_options.conf. See the security note on
+    Set-RemoteCommands before using this either way.
+
 .PARAMETER InstallTask
     Install a scheduled task for daily drift enforcement. Auto-skipped on
     Intune-managed hosts -- see -Force. Two enforcement loops fighting over
@@ -68,7 +85,8 @@ param(
     [string]$SysmonConfigPath,
     [switch]$InstallTask,
     [switch]$Force,
-    [switch]$SkipProcessCreation
+    [switch]$SkipProcessCreation,
+    [switch]$SkipRemoteCommands
 )
 
 $ErrorActionPreference = "Stop"
@@ -79,9 +97,26 @@ $MarkerKey   = "HKLM:\SOFTWARE\Wazuh\Bootstrap"
 $TaskName    = "Wazuh-EndpointAuditing"
 $SelfPath    = Join-Path $LogDir "Configure-EndpointAuditing.ps1"
 
+# Hard-coded rather than derived from ${env:ProgramFiles(x86)} for the same
+# reason as the Sysmon path below: a 32-bit PowerShell host resolves the
+# environment variables differently and would miss the directory.
+$InstallDir  = "C:\Program Files (x86)\ossec-agent"
+$LocalOptions = Join-Path $InstallDir "local_internal_options.conf"
+$ServiceName = "WazuhSvc"
+
 # Bump this when you change what the script enforces. Detect-WazuhAgent.ps1
 # compares against it, so bumping forces a re-run across the fleet.
-$AuditRev    = 1
+# rev 2: added local_internal_options.conf remote_commands enforcement.
+$AuditRev    = 2
+
+# Default Sysmon config. wazuh_enroll.ps1 stages the packaged config here, so
+# the scheduled task (registered with no -SysmonConfigPath) can still detect
+# drift. Only used when the file is actually present -- a missing default must
+# not turn into a Problem on a host that never had Sysmon.
+if (-not $SysmonConfigPath) {
+    $defaultSysmonCfg = Join-Path $LogDir "sysmonconfig.xml"
+    if (Test-Path $defaultSysmonCfg) { $SysmonConfigPath = $defaultSysmonCfg }
+}
 
 # Process Creation subcategory. The GUID is used rather than the display
 # name because the name is localized -- "Process Creation" does not exist on
@@ -92,6 +127,7 @@ New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 
 $script:Problems = @()
 $script:Changed  = 0
+$script:NeedsAgentRestart = $false
 
 function Log {
     param([string]$Message, [string]$Level = "INFO")
@@ -311,7 +347,129 @@ function Set-SysmonConfig {
 }
 
 # ---------------------------------------------------------------------------
-# 4. Scheduled task -- for hosts Intune does not manage
+# 4. local_internal_options.conf -- remote_commands
+# ---------------------------------------------------------------------------
+# wazuh_enroll.ps1 already writes these at enrollment. They are re-enforced
+# here because enrollment runs once and this runs daily: an agent MSI upgrade
+# replaces local_internal_options.conf, and without this the loss is silent.
+# Nothing else checks it, the agent keeps reporting healthy, and the only
+# symptom is that <localfile><command> stanzas from the shared agent.conf
+# quietly stop producing events -- which is exactly how the netstat gap went
+# unnoticed the first time.
+#
+# SECURITY NOTE, unchanged from wazuh_enroll.ps1: only a file on the endpoint
+# decides whether the agent will run commands the manager pushes. Turning
+# these on makes write access to the windows-agents agent.conf equivalent to
+# SYSTEM execution on every host in the group. That is a deliberate trade for
+# the telemetry, not a default to set and forget -- it belongs in the same
+# threat model as manager access itself.
+function Set-RemoteCommands {
+    if ($SkipRemoteCommands) {
+        Log "Skipping remote_commands (-SkipRemoteCommands)."
+        return
+    }
+
+    # An unenrolled host has no agent directory. Not a Problem: this script is
+    # allowed to run on a machine where the MSI has not landed yet.
+    if (-not (Test-Path $InstallDir)) {
+        Log "Wazuh agent not installed here; skipping local_internal_options.conf." "WARN"
+        return
+    }
+
+    $opts = [ordered]@{
+        "logcollector.remote_commands"  = 1
+        "wazuh_command.remote_commands" = 1
+    }
+
+    $lines = @()
+    if (Test-Path $LocalOptions) {
+        # ReadAllText, not Get-Content: Test-Path plus Get-Content on a file
+        # the agent is holding open is fine, but Select-String -Path (as in
+        # the snippet this replaces) throws outright under
+        # $ErrorActionPreference = "Stop" when the file is absent, taking the
+        # whole script down instead of logging one skipped setting.
+        $raw = [IO.File]::ReadAllText($LocalOptions)
+        if ($raw.Length -gt 0) { $lines = @($raw -split "`r?`n") }
+    }
+
+    $missing = @()
+    foreach ($key in $opts.Keys) {
+        # Anchored to an ACTIVE assignment. An unanchored match would also hit
+        # the "# logcollector.remote_commands=0" comment the MSI ships, read it
+        # as already-configured, and never write the real value -- the setting
+        # would look enforced and be off.
+        $pattern = '^\s*' + [regex]::Escape($key) + '\s*=\s*' + $opts[$key] + '\s*$'
+        if (-not ($lines | Where-Object { $_ -match $pattern })) {
+            $missing += $key
+        }
+    }
+
+    if ($missing.Count -eq 0) {
+        Log "OK: remote_commands already set in local_internal_options.conf."
+        return
+    }
+
+    if ($Check) {
+        Problem ("local_internal_options.conf missing: " + ($missing -join ", "))
+        return
+    }
+
+    foreach ($key in $opts.Keys) {
+        $pattern = '^\s*' + [regex]::Escape($key) + '\s*='
+        $hit  = $false
+        $kept = @()
+        # Rewrite the first active assignment in place and drop duplicates
+        # after it. A bare Add-Content -- which is what the snippet does --
+        # appends unconditionally, so under Intune's re-run-on-failed-detection
+        # loop the file grows a fresh duplicate pair every repair cycle.
+        foreach ($line in $lines) {
+            if ($line -match $pattern) {
+                if (-not $hit) { $kept += "$key=$($opts[$key])"; $hit = $true }
+            } else {
+                $kept += $line
+            }
+        }
+        if (-not $hit) { $kept += "$key=$($opts[$key])" }
+        $lines = $kept
+    }
+
+    # No BOM, for the same reason wazuh_enroll.ps1 uses Write-TextNoBom on
+    # ossec.conf: Set-Content in PS 5.1 prepends EF BB BF and the agent's
+    # parser treats the first line as garbage.
+    $text = (($lines -join "`r`n").TrimEnd()) + "`r`n"
+    [IO.File]::WriteAllText($LocalOptions, $text, (New-Object System.Text.UTF8Encoding($false)))
+
+    Log ("SET: local_internal_options.conf -> " + ($missing -join ", "))
+    $script:Changed++
+    $script:NeedsAgentRestart = $true
+}
+
+# local_internal_options.conf is read at service start only. Without this the
+# file is correct on disk and the agent is still running without the setting,
+# so the next -Check passes while remote commands stay dead until something
+# unrelated restarts the service.
+function Restart-AgentIfNeeded {
+    if (-not $script:NeedsAgentRestart) { return }
+
+    $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if (-not $svc) {
+        Log "Agent service '$ServiceName' not found; cannot restart." "WARN"
+        return
+    }
+
+    try {
+        Restart-Service -Name $ServiceName -Force
+        Log "Restarted '$ServiceName' to pick up local_internal_options.conf."
+    } catch {
+        # Non-fatal: the file is written, so the setting takes effect at the
+        # next start regardless. Flagged rather than fatal because failing here
+        # would undo an otherwise good run.
+        Problem "Could not restart '$ServiceName': $($_.Exception.Message)"
+    }
+}
+
+# ---------------------------------------------------------------------------
+# 5. Scheduled task -- for hosts Intune does not manage
 # ---------------------------------------------------------------------------
 function Test-IntuneManaged {
     if (Get-Service -Name "IntuneManagementExtension" -ErrorAction SilentlyContinue) { return $true }
@@ -344,6 +502,7 @@ function Install-EnforcementTask {
     $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$SelfPath`""
     if ($SysmonConfigPath)   { $argList += " -SysmonConfigPath `"$SysmonConfigPath`"" }
     if ($SkipProcessCreation){ $argList += " -SkipProcessCreation" }
+    if ($SkipRemoteCommands) { $argList += " -SkipRemoteCommands" }
     # -InstallTask is not passed: the task would otherwise reinstall itself
     # on every run.
 
@@ -369,6 +528,10 @@ Log "=== Endpoint auditing configuration (rev $AuditRev, mode: $(if($Check){'CHE
 Set-ProcessCreationAuditing
 Set-PowerShellLogging
 Set-SysmonConfig
+Set-RemoteCommands
+# After the config writes, before the task: a restart failure should still be
+# reported by the same $Problems path as everything else.
+Restart-AgentIfNeeded
 Install-EnforcementTask
 
 if ($Check) {
