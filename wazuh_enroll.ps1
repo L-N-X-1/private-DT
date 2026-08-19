@@ -72,6 +72,23 @@
     frequency-based rule. Only use this if you also remove the matching
     <localfile> entry from the group's agent.conf.
 
+.PARAMETER BufferQueueSize
+    <client_buffer><queue_size>. Capacity of the agent's leaky bucket in
+    events. Wazuh's default is 5000; this script writes 10000. Allowed range
+    is 1-100000.
+
+.PARAMETER BufferEventsPerSecond
+    <client_buffer><events_per_second>. Maximum rate the agent drains its
+    bucket toward the manager. Wazuh's default is 500; this script writes
+    1000, which is the documented maximum. Allowed range is 1-1000.
+
+    NOTE: client_buffer is one of the sections that CAN live in the manager's
+    shared agent.conf, and centralized config wins over the local ossec.conf.
+    If windows-agents/agent.conf declares a <client_buffer>, these two
+    parameters are overridden on the agent and have no effect. Either set the
+    values there instead, or make sure the group config leaves client_buffer
+    undeclared.
+
 .PARAMETER Version
     Wazuh agent version to install (only used if not already installed).
     Defaults to 4.14.6. Must not be newer than your manager's version.
@@ -126,6 +143,14 @@ param(
 
     [Parameter(Mandatory = $false)]
     [switch]$LocalLogSources,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 100000)]
+    [int]$BufferQueueSize = 10000,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 1000)]
+    [int]$BufferEventsPerSecond = 1000,
 
     [Parameter(Mandatory = $false)]
     [string]$Version = "4.14.3"
@@ -232,6 +257,7 @@ if ($AgentCertificatePath) {
 } else {
     Write-Host "  Agent identity verification (this agent): DISABLED (no -AgentCertificatePath/-AgentKeyPath given)" -ForegroundColor Yellow
 }
+Write-Host "  Client buffer:                            queue_size=$BufferQueueSize, events_per_second=$BufferEventsPerSecond (Wazuh defaults: 5000/500)"
 if ($LocalLogSources) {
     Write-Host "  Sysmon log source:                        LOCAL (-LocalLogSources given -- remove it from the group agent.conf!)" -ForegroundColor Yellow
 } else {
@@ -380,7 +406,9 @@ function Set-WazuhClientBlock {
     param(
         [Parameter(Mandatory)][string]$ConfPath,
         [Parameter(Mandatory)][string]$Manager,
-        [int]$Port = 1514
+        [int]$Port = 1514,
+        [int]$BufferQueueSize = 10000,
+        [int]$BufferEventsPerSecond = 1000
     )
 
     if (-not (Test-Path $ConfPath)) { Fail "ossec.conf not found at $ConfPath" }
@@ -407,6 +435,19 @@ function Set-WazuhClientBlock {
   </client>
 "@
 
+    # Raised from the 5000/500 the MSI ships. The Sysmon baseline above
+    # collects with no exclusions, so a busy host can burst well past 500 EPS
+    # and start dropping events once the bucket fills -- that shows up as
+    # "Agent buffer is full: Events may be lost" in ossec.log. 1000 is the
+    # documented ceiling for events_per_second; queue_size can go to 100000.
+    $bufferBlock = @"
+  <client_buffer>
+    <disabled>no</disabled>
+    <queue_size>$BufferQueueSize</queue_size>
+    <events_per_second>$BufferEventsPerSecond</events_per_second>
+  </client_buffer>
+"@
+
     $backup = "$ConfPath.bak.$PID"
     Copy-Item $ConfPath $backup -Force
 
@@ -424,8 +465,18 @@ function Set-WazuhClientBlock {
         $content = [regex]::Replace($content, '</ossec_config>', { param($m) "$block`r`n</ossec_config>" }, 1)
     }
 
+    # Same treatment for <client_buffer>. Note '</client>' above cannot match
+    # inside '</client_buffer>', so the two patterns don't collide.
+    $bufferPattern = '(?s)<client_buffer>.*?</client_buffer>'
+    if ([regex]::IsMatch($content, $bufferPattern)) {
+        $content = [regex]::Replace($content, $bufferPattern, { param($m) $bufferBlock }, 1)
+    } else {
+        $content = [regex]::Replace($content, '</ossec_config>', { param($m) "$bufferBlock`r`n</ossec_config>" }, 1)
+    }
+
     Write-TextNoBom -Path $ConfPath -Text $content
     Write-Step "Wrote <client> block (manager ${Manager}:${Port}) to ossec.conf"
+    Write-Step "Set <client_buffer>: queue_size=$BufferQueueSize, events_per_second=$BufferEventsPerSecond"
     return $backup
 }
 
@@ -440,7 +491,8 @@ function Restore-OssecConf {
     }
 }
 
-$confBackup = Set-WazuhClientBlock -ConfPath $OssecConf -Manager $Manager -Port $EventPort
+$confBackup = Set-WazuhClientBlock -ConfPath $OssecConf -Manager $Manager -Port $EventPort `
+    -BufferQueueSize $BufferQueueSize -BufferEventsPerSecond $BufferEventsPerSecond
 
 # ---------- 5. enroll (re-enroll even if already installed) ----------
 Write-Step "Enrolling agent with ${RegistrationServer}:$RegPort (group: $AgentGroup) ..."

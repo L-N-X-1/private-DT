@@ -1,102 +1,101 @@
-<!--
-  /var/ossec/etc/shared/windows-agents/agent.conf
-
-  This is the "basic configuration that syncs automatically" half of the
-  requirement. Agents enrolled with -G windows-agents pull this file from the
-  manager within ~10 minutes and on every restart. Change it here and the
-  whole group picks it up - you never touch an endpoint's ossec.conf again.
-
-  Push it with:
-    docker cp agent.conf-windows-agents.xml \
-      <manager-container>:/var/ossec/etc/shared/windows-agents/agent.conf
-    docker exec <manager-container> chown wazuh:wazuh \
-      /var/ossec/etc/shared/windows-agents/agent.conf
-
-  Validate BEFORE restarting - a malformed agent.conf will be pushed to every
-  agent in the group and can knock the whole group offline:
-    docker exec <manager-container> /var/ossec/bin/verify-agent-conf
--->
-<agent_config os="Windows">
-
-  <!-- Windows event channels -->
-  <localfile>
-    <location>Microsoft-Windows-Sysmon/Operational</location>
-    <log_format>eventchannel</log_format>
-  </localfile>
-
-  <localfile>
-    <location>Security</location>
-    <log_format>eventchannel</log_format>
-    <query>Event/System[EventID != 5145 and EventID != 5156 and EventID != 5447]</query>
-  </localfile>
-
-  <localfile>
-    <location>System</location>
-    <log_format>eventchannel</log_format>
-  </localfile>
-
-  <localfile>
-    <location>Application</location>
-    <log_format>eventchannel</log_format>
-  </localfile>
-
-  <localfile>
-    <location>Microsoft-Windows-PowerShell/Operational</location>
-    <log_format>eventchannel</log_format>
-  </localfile>
-
-  <localfile>
-    <location>Microsoft-Windows-Windows Defender/Operational</location>
-    <log_format>eventchannel</log_format>
-  </localfile>
-
-  <!-- Re-enrollment safety net. The agent keeps the manager CA so it can
-       still verify the manager, but it does NOT hold a client cert any more
-       (that was consumed at first enrollment and shredded). With
-       ssl_agent_ca enforced on the manager, an agent that loses its key
-       cannot re-enroll on its own - the Intune detection script fails,
-       the installer re-runs, and a fresh cert is fetched. That is the
-       intended repair path. -->
-  <client>
-    <enrollment>
+  <agent_config os="Windows">
+    <!-- Windows event channels -->
+    <localfile>
+      <location>Microsoft-Windows-Sysmon/Operational</location>
+      <log_format>eventchannel</log_format>
+    </localfile>
+    <localfile>
+      <location>Security</location>
+      <log_format>eventchannel</log_format>
+      <query>Event/System[EventID != 5145 and EventID != 5156 and EventID != 5447]</query>
+    </localfile>
+    <localfile>
+      <location>System</location>
+      <log_format>eventchannel</log_format>
+    </localfile>
+    <localfile>
+      <location>Application</location>
+      <log_format>eventchannel</log_format>
+    </localfile>
+    <localfile>
+      <location>Microsoft-Windows-PowerShell/Operational</location>
+      <log_format>eventchannel</log_format>
+    </localfile>
+    <localfile>
+      <location>Microsoft-Windows-Windows Defender/Operational</location>
+      <log_format>eventchannel</log_format>
+    </localfile>
+    <localfile>
+      <log_format>full_command</log_format>
+      <command>netstat -nao | findstr /R /C:"[UT][DC]P.*LISTENING" /C:"UDP"</command>
+      <alias>netstat listening ports</alias>
+      <frequency>360</frequency>
+    </localfile>
+    <!-- Inventory + posture -->
+    <wodle name="syscollector">
+      <disabled>no</disabled>
+      <interval>1h</interval>
+      <scan_on_start>yes</scan_on_start>
+      <hardware>yes</hardware>
+      <os>yes</os>
+      <network>yes</network>
+      <packages>yes</packages>
+      <ports all="no">yes</ports>
+      <processes>yes</processes>
+      <hotfixes>yes</hotfixes>
+    </wodle>
+    <sca>
       <enabled>yes</enabled>
-      <agent_name>${hostname}</agent_name>
-      <groups>windows-agents</groups>
-      <server_ca_path>C:\ProgramData\WazuhBootstrap\manager-ca.pem</server_ca_path>
-      <auto_method>no</auto_method>
-      <delay_after_enrollment>20</delay_after_enrollment>
-    </enrollment>
-  </client>
-
-  <!-- Inventory + posture -->
-  <wodle name="syscollector">
-    <disabled>no</disabled>
-    <interval>1h</interval>
-    <scan_on_start>yes</scan_on_start>
-    <hardware>yes</hardware>
-    <os>yes</os>
-    <network>yes</network>
-    <packages>yes</packages>
-    <ports all="no">yes</ports>
-    <processes>yes</processes>
-    <hotfixes>yes</hotfixes>
-  </wodle>
-
-  <sca>
-    <enabled>yes</enabled>
-    <scan_on_start>yes</scan_on_start>
-    <interval>12h</interval>
-  </sca>
-
-  <!-- File integrity on the paths that matter on a workstation -->
-  <syscheck>
-    <disabled>no</disabled>
-    <frequency>43200</frequency>
-    <scan_on_start>yes</scan_on_start>
-    <directories check_all="yes" realtime="yes">%WINDIR%\System32\drivers\etc</directories>
-    <directories check_all="yes" realtime="yes">%PROGRAMDATA%\Microsoft\Windows\Start Menu\Programs\Startup</directories>
-    <directories check_all="yes">C:\Program Files (x86)\ossec-agent\ossec.conf</directories>
-    <ignore type="sregex">.log$|.tmp$</ignore>
-  </syscheck>
-
-</agent_config>
+      <scan_on_start>yes</scan_on_start>
+      <interval>12h</interval>
+    </sca>
+    <!-- File integrity on the paths that matter on a workstation -->
+    <syscheck>
+      <disabled>no</disabled>
+      <frequency>21600</frequency>
+      <scan_on_start>yes</scan_on_start>
+      <alert_new_files>yes</alert_new_files>
+      <!-- Downloads and Desktop: the "downloaded binaries" requirement.
+           restrict= keeps the volume sane by ignoring documents and media. -->
+      <directories check_all="yes" whodata="yes" restrict="\.(exe|dll|ps1|bat|cmd|vbs|js|jse|scr|hta|msi|jar|lnk|iso)$">C:\Users\*\Downloads</directories>
+      <directories check_all="yes" whodata="yes" restrict="\.(exe|dll|ps1|bat|cmd|vbs|js|jse|scr|hta|msi|jar|lnk)$">C:\Users\*\Desktop</directories>
+      <!-- Living-off-the-land staging -->
+      <directories check_all="yes" whodata="yes" restrict="\.(exe|dll|ps1|bat|cmd|vbs|scr)$">C:\Users\*\AppData\Local\Temp</directories>
+      <directories check_all="yes" whodata="yes" restrict="\.(exe|dll|ps1|bat|cmd|vbs|scr)$">C:\Windows\Temp</directories>
+      <!-- Persistence -->
+      <directories check_all="yes" whodata="yes">%PROGRAMDATA%\Microsoft\Windows\Start Menu\Programs\Startup</directories>
+      <directories check_all="yes" whodata="yes">C:\Users\*\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup</directories>
+      <directories check_all="yes" whodata="yes">C:\Windows\System32\Tasks</directories>
+      <!-- Config / integrity -->
+      <directories check_all="yes" whodata="yes" report_changes="yes">%WINDIR%\System32\drivers\etc</directories>
+      <directories check_all="yes" whodata="yes" report_changes="yes">C:\Program Files (x86)\ossec-agent\ossec.conf</directories>
+      <!-- System binaries: scheduled scan only. whodata on all of System32 is a
+           well-known way to bury an indexer; the scheduled hash comparison catches
+           tampering without the per-event firehose. -->
+      <directories check_all="yes" realtime="no">%WINDIR%\System32</directories>
+      <ignore type="sregex">\.log$|\.tmp$|\.etl$|\.evtx$</ignore>
+      <ignore>C:\Users\*\AppData\Local\Temp\chrome_*</ignore>
+      <windows_registry arch="both">HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Run</windows_registry>
+      <windows_registry arch="both">HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\RunOnce</windows_registry>
+      <windows_registry>HKEY_LOCAL_MACHINE\System\CurrentControlSet\Services</windows_registry>
+      <process_priority>10</process_priority>
+      <max_eps>100</max_eps>
+      <synchronization>
+        <enabled>yes</enabled>
+        <interval>5m</interval>
+        <max_eps>10</max_eps>
+      </synchronization>
+    </syscheck>
+    <wodle name="syscollector">
+      <disabled>no</disabled>
+      <interval>30m</interval>
+      <scan_on_start>yes</scan_on_start>
+      <hardware>yes</hardware>
+      <os>yes</os>
+      <network>yes</network>
+      <packages>yes</packages>
+      <ports all="no">yes</ports>
+      <processes>yes</processes>
+      <hotfixes>yes</hotfixes>
+    </wodle>
+  </agent_config>
